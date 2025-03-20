@@ -1,7 +1,7 @@
 
 # BEVDiffuser: Plug-and-Play Diffusion Model for BEV Denoising with Ground-Truth Guidance
 
-<img src="https://github.com/Xin-Ye-1/HRL-GRG/blob/main/bevdiffuser.png" width="80%" height="80%" align=center />
+<img src="https://github.com/Xin-Ye-1/BEVDiffuser/blob/main/bevdiffuser.png" width="80%" height="80%" align=center />
 
 Official implementation of BEVDiffuser. 
 
