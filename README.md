@@ -7,7 +7,7 @@
 <a href='https://xin-ye-1.github.io/BEVDiffuser/'><img src='https://img.shields.io/badge/Project_Page-BEVDiffuser-green' alt='Project Page'></a>
 
 <img src="https://github.com/Xin-Ye-1/BEVDiffuser/blob/main/bevdiffuser.png" width="100%" height="100%" align=center />
-
+<br>
 </div>
 
 
