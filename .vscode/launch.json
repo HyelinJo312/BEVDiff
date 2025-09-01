@@ -1,0 +1,65 @@
+{
+
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Train",
+            "type": "debugpy",
+            "request": "launch",
+            //"module": "torch.distributed.launch",
+            //"justMyCode": true,
+            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser.py",
+            "console": "integratedTerminal",
+            "args": [
+            // "--nnodes", "1",
+            // "--node_rank", "0",
+            // "--nproc_per_node", "3",
+            // "--master_addr", "127.0.0.1",
+            // "--master_port", "29507",
+            // "--workers", "2"
+            "--bev_config", "BEVFormer/projects/configs/bevdiffuser/layout_tiny.py",
+            "--bev_checkpoint", "BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
+            "--pretrained_unet_checkpoint", "None",
+            "--gpus", "1",
+            "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-2-1"
+            ],
+
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0"
+            }
+        },
+
+        {
+            "name": "Train_bevdiffuser_pretrain", 
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/BEVFormer/tools/train_pretrain.py",
+            "console": "integratedTerminal",
+            "args": [
+                "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_pretrain_GTlayout.py", 
+                // "--launcher", "None",
+                "--deterministic",
+                "--work_dir", "${workspaceFolder}/results_pretrain_debug_v2",
+                // "--load_from", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
+                // "--resume_from", "None",
+                "--report_to", "tensorboard",
+                "--denoise_loss_weight", "10.0"
+
+            ],
+
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "1",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+
+
+            }
+        }
+            
+    ]
+}

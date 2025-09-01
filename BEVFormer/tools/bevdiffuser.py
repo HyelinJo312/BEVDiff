@@ -74,6 +74,6 @@ class BEVDiffuser(nn.Module):
                 t_batch = torch.tensor([t] * x.shape[0], device=x.device)
                 noise_pred_uncond, noise_pred_cond = self.unet(x, t_batch, **uncond)[0], self.unet(x, t_batch, **cond)[0]
                 noise_pred = noise_pred_uncond + 2.0 * (noise_pred_cond - noise_pred_uncond)
-                classifier_gradient = grad_fn(x) if self.use_classifier_guidence and grad_fn else None
+                classifier_gradient = grad_fn(x) if self.use_classifier_guidence and grad_fn else None # self.use_classifier_guidence=False
                 x = self.noise_scheduler.step(noise_pred, t, x, return_dict=False, classifier_gradient=classifier_gradient)[0] 
         return x

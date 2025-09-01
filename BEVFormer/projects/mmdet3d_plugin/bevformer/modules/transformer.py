@@ -145,8 +145,11 @@ class PerceptionTransformer(BaseModule):
             np.sin(bev_angle / 180 * np.pi) / grid_length_x / bev_w
         shift_y = shift_y * self.use_shift
         shift_x = shift_x * self.use_shift
-        shift = bev_queries.new_tensor(
-            [shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
+        arr = np.stack([shift_x, shift_y], axis=-1)                              # (bs, 2)
+        arr = np.ascontiguousarray(arr).astype(np.float32, copy=False)
+        shift = torch.from_numpy(arr).to(device=bev_queries.device, dtype=bev_queries.dtype)
+        # shift = bev_queries.new_tensor(
+        #     [shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
 
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:
@@ -164,8 +167,10 @@ class PerceptionTransformer(BaseModule):
                     prev_bev[:, i] = tmp_prev_bev[:, 0]
 
         # add can bus signals
-        can_bus = bev_queries.new_tensor(
-            [each['can_bus'] for each in kwargs['img_metas']])  # [:, :]
+        # can_bus = bev_queries.new_tensor(
+        #     [each['can_bus'] for each in kwargs['img_metas']])  # [:, :]
+        can_bus_np = np.stack([each['can_bus'] for each in kwargs['img_metas']], axis=0)  # (bs, K)
+        can_bus = torch.from_numpy(np.ascontiguousarray(can_bus_np)).to(device=bev_queries.device, dtype=bev_queries.dtype)
         can_bus = self.can_bus_mlp(can_bus)[None, :, :]
         bev_queries = bev_queries + can_bus * self.use_can_bus
 

@@ -160,7 +160,10 @@ class BEVFormer(MVXTwoStageDetector):
         augmentations.
         """
         if return_loss:
-            return self.forward_train(**kwargs)
+            if only_bev:
+                return self.forward_train(only_bev=True, **kwargs)
+            else:
+                return self.forward_train(only_bev=False, **kwargs)
         else:
             if only_bev:
                 return self.obtain_bev(**kwargs)
@@ -206,6 +209,7 @@ class BEVFormer(MVXTwoStageDetector):
                       gt_bboxes_ignore=None,
                       img_depth=None,
                       img_mask=None,
+                      only_bev=False,
                       given_bev=None,
                       **kwargs,
                       ):
@@ -244,13 +248,18 @@ class BEVFormer(MVXTwoStageDetector):
         if not img_metas[0]['prev_bev_exists']:
             prev_bev = None
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
-        losses = dict()
-        losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,
-                                            gt_labels_3d, img_metas,
-                                            gt_bboxes_ignore, prev_bev, given_bev)
+        
+        if only_bev:
+            bev_embed = self.pts_bbox_head(img_feats, img_metas, prev_bev, only_bev=True) # B, H*W, C
+            return bev_embed
+        else:
+            losses = dict()
+            losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,
+                                                gt_labels_3d, img_metas,
+                                                gt_bboxes_ignore, prev_bev, given_bev)
 
-        losses.update(losses_pts)
-        return losses
+            losses.update(losses_pts)
+            return losses
 
     def forward_test(self, img_metas, img=None, only_bev=False, given_bev=None, return_eval_loss=False, **kwargs):            
         for var, name in [(img_metas, 'img_metas')]:
@@ -346,3 +355,4 @@ class BEVFormer(MVXTwoStageDetector):
             img_metas=img_metas)
         loss, _ = self._parse_losses(losses)
         return outs['bev_embed'], loss
+

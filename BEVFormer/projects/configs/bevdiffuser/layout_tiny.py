@@ -72,6 +72,7 @@ unet = dict(
         dropout=0.0,
         use_checkpoint=False,
         use_positional_embedding_for_attention=True,
+        return_multiscale=True,
         attention_block_type='ObjectAwareCrossAttention',
         layout_encoder=dict(
             type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
@@ -97,7 +98,7 @@ model = dict(
     type='BEVFormer',
     use_grid_mask=True,
     video_test_mode=True,
-    pretrained=dict(img='torchvision://resnet50'),
+    # pretrained=dict(img='torchvision://resnet50'),
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -106,7 +107,8 @@ model = dict(
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
-        style='pytorch'),
+        style='pytorch',
+        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')),
     img_neck=dict(
         type='FPN',
         in_channels=[2048],
@@ -216,9 +218,9 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-data_root = 'data/nuscenes/'
+data_root = '../../data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
-
 
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -286,7 +288,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=2e-4,
+    lr=2e-4, 
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
@@ -302,7 +304,8 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=1, pipeline=test_pipeline)
+
+evaluation = dict(interval=total_epochs, pipeline=test_pipeline)
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 

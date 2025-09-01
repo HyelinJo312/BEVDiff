@@ -52,7 +52,7 @@ num_classes = len(class_names) + 2
 use_3d_bbox = True
 
 unet = dict(
-    type='projects.bev_diffuser.layout_diffusion.layout_diffusion_unet.LayoutDiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.layout_diffusion_unet.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -74,7 +74,7 @@ unet = dict(
         use_positional_embedding_for_attention=True,
         attention_block_type='ObjectAwareCrossAttention',
         layout_encoder=dict(
-            type='projects.bev_diffuser.layout_diffusion.layout_encoder.LayoutTransformerEncoder',
+            type='projects.bevdiffuser.layout_diffusion.layout_encoder.LayoutTransformerEncoder',
             parameters=dict(
                 used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
                 layout_length=num_bboxes,
@@ -231,8 +231,10 @@ model = dict(
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
 # data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/'
-info_root = "/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/" # bevformer info
-data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/'
+# info_root = "/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/" # bevformer info
+# data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/'
+# data_root = 'data/nuscenes/'
+data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 
@@ -270,12 +272,12 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=8,
+    samples_per_gpu=4,
     workers_per_gpu=8,
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'nuscenes_infos_temporal_train_revised.pkl',
+        ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -288,12 +290,12 @@ data = dict(
         box_type_3d='LiDAR'),
     val=dict(type=dataset_type,
              data_root=data_root,
-             ann_file=data_root + 'nuscenes_infos_temporal_val_revised.pkl',
+             ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
-              ann_file=data_root + 'nuscenes_infos_temporal_val_revised.pkl',
+              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
@@ -317,8 +319,8 @@ lr_config = dict(
     warmup_iters=500,
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
-total_epochs = 24
-evaluation = dict(interval=1, pipeline=test_pipeline)
+total_epochs = 12
+evaluation = dict(interval=6, pipeline=test_pipeline)
 
 runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
 

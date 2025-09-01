@@ -166,6 +166,7 @@ def test():
     bev_model = get_bev_model(args)
     if not args.use_classifier_guidence:
         bev_model.requires_grad_(False)
+    bev_model.eval()
     
     unet = build_unet(bev_cfg.unet)
     unet.from_pretrained(args.checkpoint_dir, subfolder="unet")
@@ -288,20 +289,47 @@ def evaluate(unet,
                 noise_timesteps = torch.tensor(noise_timesteps).long()   
                 latents = noise_scheduler.add_noise(latents, noise, noise_timesteps)
         
-        if denoise_timesteps > 0:        
+        # if denoise_timesteps > 0:        
+        #     cond, uncond = get_condition(batch, use_cond=True), get_condition(batch, use_cond=False)
+            
+        #     # # DDIM
+        #     noise_scheduler.config.num_train_timesteps=denoise_timesteps
+        #     noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
+        
+        #     for _, t in enumerate(noise_scheduler.timesteps):
+        #         t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
+        #         noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, **uncond)[0], unet(latents, t_batch, **cond)[0]
+        #         noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
+        #         classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
+        #         latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
+        
+        # --------------------------------------------------------------------------------------------------------------------------------
+        if denoise_timesteps > 0:
             cond, uncond = get_condition(batch, use_cond=True), get_condition(batch, use_cond=False)
             
             # # DDIM
-            noise_scheduler.config.num_train_timesteps=denoise_timesteps
+            noise_scheduler.config.num_train_timesteps = denoise_timesteps
             noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
-        
+
             for _, t in enumerate(noise_scheduler.timesteps):
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, **uncond)[0], unet(latents, t_batch, **cond)[0]
-                noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
+                pred_uncond, pred_cond = unet(latents, t_batch, **uncond)[0], unet(latents, t_batch, **cond)[0]
+                pred = pred_uncond + 2 * (pred_cond - pred_uncond)  # classifier-free guidance
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
-                latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-                        
+                if noise_scheduler.config.prediction_type == "epsilon":
+                    # DDIM-style denoising: noise prediction
+                    alpha_bar = noise_scheduler.alphas_cumprod[t].to(latents.device)
+                    sqrt_alpha_bar = torch.sqrt(alpha_bar).view(-1, 1, 1, 1)
+                    sqrt_one_minus_alpha_bar = torch.sqrt(1.0 - alpha_bar).view(-1, 1, 1, 1)
+                    x0_pred = (latents - sqrt_one_minus_alpha_bar * pred) / sqrt_alpha_bar
+                    latents = x0_pred  # OR latents = blend(latents, x0_pred)
+                elif noise_scheduler.config.prediction_type == "sample":
+                    latents = noise_scheduler.step(pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
+                else:
+                    raise ValueError(f"Unsupported prediction_type: {noise_scheduler.config.prediction_type}")
+        
+        # --------------------------------------------------------------------------------------------------------------------------------
+    
         # get detection results
         latents = latents.permute(0, 2, 3, 1)            
         latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)

@@ -38,19 +38,19 @@ from mmdet.apis import set_random_seed
 from mmseg import __version__ as mmseg_version
 
 from mmcv.utils import TORCH_VERSION, digit_version
-from BEVFormer.tools.bevdiffuser import BEVDiffuser
-
+# from BEVFormer.tools.bevdiffuser import BEVDiffuser
+from bevdiffuser import BEVDiffuser
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
-    parser.add_argument('--work-dir', help='the dir to save logs and models')
+    parser.add_argument('--work_dir', help='the dir to save logs and models')
     parser.add_argument(
-        '--unet-checkpoint-dir', help='the checkpoint file of unet')
+        '--unet_checkpoint_dir', help='the checkpoint file of unet')
     parser.add_argument(
-        '--load-from', help='the checkpoint file to load from')
+        '--load_from', help='the checkpoint file to load from')
     parser.add_argument(
-        '--resume-from', help='the checkpoint file to resume from')
+        '--resume_from', help='the checkpoint file to resume from')
     parser.add_argument(
         '--no-validate',
         action='store_true',
@@ -100,7 +100,7 @@ def parse_args():
         action='store_true',
         help='automatically scale lr with the number of gpus')
     parser.add_argument(
-        "--report-to",
+        "--report_to",
         type=str,
         default=None,
         help=(
@@ -108,12 +108,12 @@ def parse_args():
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
         ))
     parser.add_argument(
-        "--tracker-project-name",
+        "--tracker_project_name",
         type=str,
         default="DiffBEVFormer"
     )
     parser.add_argument(
-        "--tracker-run-name",
+        "--tracker_run_name",
         type=str,
         default=None
     )
@@ -214,6 +214,12 @@ def main():
                                   id=args.tracker_run_name))
         )
         print(args.tracker_run_name)
+
+    elif args.report_to == "tensorboard":
+        cfg.log_config.hooks.append(
+            dict(type="TensorboardLoggerHook")
+        )
+        print("[tensorboard] logger enabled", args.tracker_run_name)
 
     # init distributed env first, since logger depends on the dist info.
     if args.launcher == 'none':

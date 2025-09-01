@@ -151,14 +151,15 @@ class DiffBEVFormer(BEVFormer):
         Returns:
             dict: Losses of each branch.
         """
+        # original BEV feature
         bev = self.pts_bbox_head(
             pts_feats, img_metas, prev_bev, only_bev=True
         )
         
         losses = dict()
-        
+        # task loss
         outs = self.pts_bbox_head(
-        pts_feats, img_metas, prev_bev, given_bev=bev)
+            pts_feats, img_metas, prev_bev, given_bev=bev)
         loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
         losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
         
@@ -194,10 +195,10 @@ class DiffBEVFormer(BEVFormer):
                     cond['default_obj_names'] = torch.stack(kwargs['default_obj_names'])           
                 return cond
 
-            bev_ = bev_target.detach()
+            bev_ = bev_target.detach() # deno
             bev_ = bev_.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-            bev_ = bev_diffuser(bev_, get_condition(), grad_fn=get_classifier_gradient)
-            bev_ = bev_.permute(0, 2, 3, 1).reshape(-1, self.pts_bbox_head.bev_h*self.pts_bbox_head.bev_w, bev.shape[-1])
+            bev_ = bev_diffuser(bev_, get_condition(), grad_fn=get_classifier_gradient)   # 현재 grad_fn 사용 안함 (use_classifier_guidence=False)
+            bev_ = bev_.permute(0, 2, 3, 1).reshape(-1, self.pts_bbox_head.bev_h*self.pts_bbox_head.bev_w, bev.shape[-1])    # denoised feature
             loss_bev = F.mse_loss(bev.float(), bev_.detach().float(), reduction="mean")
             
             losses['loss_bev'] = loss_bev*100

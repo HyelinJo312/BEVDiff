@@ -429,7 +429,7 @@ class ObjectAwareCrossAttention(nn.Module):
         x = x.reshape(b, c, -1)  # N x C x (HxW)
 
         qkv = self.qkv_projector(self.norm_for_qkv(x))  # N x 3C x L1, 其中L1=H*W
-        bs, C, L1, L2 = qkv.shape[0], self.channels, qkv.shape[2], cond_kwargs['obj_bbox_embedding'].shape[-1]
+        bs, C, L1, L2 = qkv.shape[0], self.channels, qkv.shape[2], cond_kwargs['obj_bbox_embedding'].shape[-1]  # L2=300 (# of objects)
 
         # positional embedding for image patch
         if self.norm_first:
@@ -511,7 +511,7 @@ class ObjectAwareCrossAttention(nn.Module):
         #
         h = self.proj_out(attn_output)
 
-        output = (x + h).reshape(b, c, *spatial)
+        output = (x + h).reshape(b, c, *spatial)  # B, C, H, W
 
         if self.return_attention_embeddings:
             assert cond_kwargs is not None
@@ -668,6 +668,8 @@ class LayoutDiffusionUNetModel(nn.Module):
             norm_first=False,
             norm_for_obj_embedding=False,
             num_pre_downsample=0,
+            return_multiscale=True,
+            multiscale_indices='auto'
     ):
         super().__init__()
         self.norm_for_obj_embedding = norm_for_obj_embedding
@@ -703,6 +705,13 @@ class LayoutDiffusionUNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
+
+        # multi-scale features index
+        self.return_multiscale = return_multiscale
+        L = len(self.channel_mult)              # 레벨 수
+        bpl = self.num_res_blocks + 1           # blocks per level
+        # 최상위(레벨 0) 제외: 깊은 레벨들만 택함
+        self._ms_take = [lvl*bpl + (self.num_res_blocks - 1) for lvl in range(L-1)]
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -911,32 +920,40 @@ class LayoutDiffusionUNetModel(nn.Module):
             is_valid_obj=is_valid_obj,
             obj_name=obj_name
         )
-        xf_proj, xf_out = layout_outputs["xf_proj"], layout_outputs["xf_out"]
+        xf_proj, xf_out = layout_outputs["xf_proj"], layout_outputs["xf_out"]  # xf_proj: (B, 1024), xf_out: (B, 256, 300)
 
-        emb = emb + xf_proj.to(emb)
+        emb = emb + xf_proj.to(emb) # emb: (B, 1024)
 
-        h = x.type(self.dtype)
+        out_list = []
+        h = x.type(self.dtype)  # h: (B, C, H, W)
         for module in self.downsample_blocks:
-            h = module(h)
+            h = module(h) 
         for module in self.input_blocks:
-            h, extra_output = module(h, emb, layout_outputs)
+            h, extra_output = module(h, emb, layout_outputs) 
             if extra_output is not None:
                 extra_outputs.append(extra_output)
             hs.append(h)
         h, extra_output = self.middle_block(h, emb, layout_outputs)
         if extra_output is not None:
             extra_outputs.append(extra_output)
-        for module in self.output_blocks:
+        for i_out, module in enumerate(self.output_blocks):
             h = th.cat([h, hs.pop()], dim=1)
             h, extra_output = module(h, emb, layout_outputs)
             if extra_output is not None:
                 extra_outputs.append(extra_output)
+            if self.return_multiscale and (i_out in self._ms_take):  # i_out in [1, 4]:
+                out_list.append(h)
+            
         h = h.type(x.dtype)
         h = self.out(h)
         for module in self.upsample_blocks:
             h = module(h)
 
-        return [h, extra_outputs]
+        if self.return_multiscale:
+            out_list.append(h)
+            return out_list[::-1], extra_outputs
+        else:
+            return [h, extra_outputs]
     
     def save_pretrained(self, save_directory):
         if os.path.isfile(save_directory):

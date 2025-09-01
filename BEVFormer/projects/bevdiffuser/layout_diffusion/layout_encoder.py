@@ -292,7 +292,7 @@ class LayoutTransformerEncoder(nn.Module):
         xf_proj = self.transformer_proj(xf_out[:, 0])  # NC
         xf_out = xf_out.permute(0, 2, 1)  # NLC -> NCL
 
-        outputs['xf_proj'] = xf_proj
-        outputs['xf_out'] = xf_out
+        outputs['xf_proj'] = xf_proj  # global condition
+        outputs['xf_out'] = xf_out    # object-wise condition
 
         return outputs

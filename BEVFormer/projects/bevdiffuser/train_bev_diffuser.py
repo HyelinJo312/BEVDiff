@@ -54,7 +54,7 @@ from mmdet.apis import set_random_seed
 
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
 from scheduler_utils import DDIMGuidedScheduler
-from model_utils import get_bev_model, build_unet
+from model_utils import get_bev_model, build_unet, get_bev_model_scratch
 from test_bev_diffuser import evaluate
 
 
@@ -62,7 +62,6 @@ logger = get_logger(__name__, log_level="INFO")
 
 def train():
     args = parse_args()
-
     bev_cfg = Config.fromfile(args.bev_config)
     if args.cfg_options is not None:
         bev_cfg.merge_from_dict(args.cfg_options)
@@ -123,23 +122,33 @@ def train():
     if args.prediction_type is not None:
         noise_scheduler.register_to_config(prediction_type=args.prediction_type)
         DDIM_scheduler.register_to_config(prediction_type=args.prediction_type)
-        
-    bev_model = get_bev_model(args)
 
-    # Freeze vae and text_encoder
-    bev_model.requires_grad_(False)
-    if args.task_loss_scale != 0:
-        bev_model.module.pts_bbox_head.transformer.decoder.requires_grad_(True)
-        bev_model.module.pts_bbox_head.transformer.reference_points.requires_grad_(True)
-        bev_model.module.pts_bbox_head.cls_branches.requires_grad_(True)
-        bev_model.module.pts_bbox_head.reg_branches.requires_grad_(True)
+    # load BEV model    
+    bev_model = get_bev_model_scratch(args)
+    bev_model.module.requires_grad_(True)
+    bev_model.module.img_backbone.requires_grad_(False)
     
+    # # Freeze vae and text_encoder
+    # bev_model.requires_grad_(False)
+    # if args.task_loss_scale != 0:
+    #     bev_model.module.pts_bbox_head.transformer.decoder.requires_grad_(True)
+    #     bev_model.module.pts_bbox_head.transformer.reference_points.requires_grad_(True)
+    #     bev_model.module.pts_bbox_head.cls_branches.requires_grad_(True)
+    #     bev_model.module.pts_bbox_head.reg_branches.requires_grad_(True)
+    
+    # Train scratch BEV model
+    # bev_model = get_bev_model_scratch(args)
+    # bev_model.module.requires_grad_(True)
+    # bev_model.module.img_backbone.requires_grad_(False)
+    
+
     def get_task_loss(x, **kwargs):
         x = x.permute(0, 2, 3, 1).contiguous()
         x = x.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-        losses = bev_model(return_loss=True, given_bev=x, **kwargs)
-        loss, _ = bev_model.module._parse_losses(losses)
+        losses = bev_model(return_loss=True, given_bev=x, **kwargs)  # BEVFormer detection head loss
+        loss, _ = bev_model.module._parse_losses(losses)  # total task loss
         return loss
+    
     
     unet = build_unet(bev_cfg.unet)
     if args.pretrained_unet_checkpoint is not None and (os.path.isfile(args.pretrained_unet_checkpoint) or os.path.isdir(args.pretrained_unet_checkpoint)):
@@ -176,7 +185,7 @@ def train():
     trained_params = list(unet.parameters())
     if args.task_loss_scale != 0:
         trained_params += list(bev_model.parameters())
-    
+        
     learning_rate = args.learning_rate
 
     optimizer = optimizer_cls(
@@ -187,21 +196,49 @@ def train():
         eps=args.adam_epsilon,
     )
 
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
-    )
+    # lr_scheduler = get_scheduler(
+    #     args.lr_scheduler,
+    #     optimizer=optimizer,
+    #     num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
+    #     num_training_steps=args.max_train_steps * accelerator.num_processes,
+    # )
+    
+    # ------------------------------ Customized Optimizer & Scheduler -------------------------------
+    def get_cosine_annealing_with_warmup_scheduler(optimizer, total_iters, warmup_iters=500, warmup_ratio=1.0/3, min_lr_ratio=1e-3):
+        def lr_lambda(current_iter):
+            if current_iter < warmup_iters:
+                # Linear warmup from warmup_ratio to 1.0
+                return warmup_ratio + (1.0 - warmup_ratio) * (current_iter / warmup_iters)
+            else:
+                # Cosine annealing from 1.0 to min_lr_ratio
+                progress = (current_iter - warmup_iters) / (total_iters - warmup_iters)
+                cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+                return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        return scheduler
+    
+    num_training_steps=args.max_train_steps * accelerator.num_processes
+    
+    lr_scheduler = get_cosine_annealing_with_warmup_scheduler(
+            optimizer,
+            total_iters=num_training_steps,
+            warmup_iters=500,
+            warmup_ratio=1.0/3,
+            min_lr_ratio=1e-3)
+
+    # ----------------------------------------------------------------------------------------------
+    
     
     with accelerator.main_process_first():
         train_dataset = build_dataset(bev_cfg.data.train, 
                                       default_args={
-                                          'pc_range': bev_cfg.point_cloud_range,
-                                          'use_3d_bbox': bev_cfg.use_3d_bbox,
-                                          'num_classes': bev_cfg.num_classes,
-                                          'num_bboxes': bev_cfg.num_bboxes,
+                                        'pc_range': bev_cfg.point_cloud_range,
+                                        'use_3d_bbox': bev_cfg.use_3d_bbox,
+                                        'num_classes': bev_cfg.num_classes,
+                                        'num_bboxes': bev_cfg.num_bboxes,
                                       })
+        
         
         bev_cfg.data.test.load_annos = True
         val_dataset = build_dataset(bev_cfg.data.test,
@@ -212,7 +249,7 @@ def train():
                                         'num_bboxes': bev_cfg.num_bboxes,
                                     })
         
-      
+        
     # DataLoaders creation:
     train_dataloader = build_dataloader(
         train_dataset,
@@ -220,7 +257,7 @@ def train():
         workers_per_gpu=args.dataloader_num_workers,
         num_gpus=get_dist_info()[1],
         dist=(args.launcher != 'none'),
-        seed=args.seed,
+        seed=args.seed, 
         shuffler_sampler=bev_cfg.data.shuffler_sampler,
         nonshuffler_sampler=bev_cfg.data.nonshuffler_sampler,
     )
@@ -263,13 +300,10 @@ def train():
                 cond['is_valid_obj'][:, 0] = 1.0  
                  
         return cond
-
-
     
     unet, optimizer, lr_scheduler = accelerator.prepare(
-        unet, optimizer, lr_scheduler
-    )
-
+            unet, optimizer, lr_scheduler
+        )
 
     weight_dtype = torch.float32
 
@@ -344,6 +378,7 @@ def train():
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
+        bev_model.train()
         unet.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
@@ -355,8 +390,10 @@ def train():
 
             with accelerator.accumulate(unet):
                 # Get BEV
-                with torch.no_grad():
-                    latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
+                # with torch.no_grad():
+                #     latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
+                # latents = bev_model(return_loss=False, only_bev=True, **batch)
+                latents = bev_model(return_loss=True, only_bev=True, **batch)
                 latents = latents.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)
                 latents = latents.permute(0, 3, 1, 2).contiguous()
 
@@ -383,18 +420,33 @@ def train():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 
                 cond = get_condition(batch)
-                
 
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, **cond)[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
-                if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
-                    task_loss = get_task_loss(model_pred, **batch)
+                # if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
+                #     task_loss = get_task_loss(model_pred, **batch)
+                # else:
+                #     task_loss = 0
+                    
+                #-----------------------------------------------------------------------------------------------------
+                if args.task_loss_scale > 0:
+                    if noise_scheduler.config.prediction_type == "sample":
+                        denoised = model_pred
+                    elif noise_scheduler.config.prediction_type == "epsilon":
+                        alpha_bar = noise_scheduler.alphas_cumprod[timesteps].to(noisy_latents.device).view(-1, 1, 1, 1)
+                        sqrt_alpha_bar = torch.sqrt(alpha_bar)
+                        sqrt_one_minus_alpha_bar = torch.sqrt(1 - alpha_bar)
+                        denoised = (noisy_latents - sqrt_one_minus_alpha_bar * model_pred) / sqrt_alpha_bar
+
+                    task_loss = get_task_loss(denoised, **batch)
+                    
                 else:
                     task_loss = 0
-                    
+                #-----------------------------------------------------------------------------------------------------
+                
                 total_loss = denoise_loss + args.task_loss_scale * task_loss
 
                 # get learing rate
@@ -425,7 +477,10 @@ def train():
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                    # accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                    all_trainable = list(unet.parameters()) + [p for p in bev_model.parameters() if p.requires_grad]
+                    accelerator.clip_grad_norm_(all_trainable, args.max_grad_norm)
+                    
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -466,29 +521,33 @@ def train():
                         save_checkpoint(bev_model, filename=os.path.join(save_path, "bev_model.pth"))
                         logger.info(f"Saved state to {save_path}")
                         
+                    bev_model.eval()
                     unet.eval()
-                    with torch.no_grad():
-                        eval_path = os.path.join(save_path, 'val')
-                        eval_results = evaluate(unet=unet.module,
-                                                bev_model=bev_model,
-                                                noise_scheduler=DDIM_scheduler,
-                                                dataset=val_dataset,
-                                                dataloader=val_dataloader,
-                                                bev_cfg=bev_cfg,
-                                                eval='bbox',
-                                                save_path=eval_path,
-                                                noise_timesteps=5,
-                                                denoise_timesteps=5,
-                                                num_inference_steps=5,
-                                                use_classifier_guidence=False)
+                    if step_cnt >= 0: 
+                        with torch.no_grad():
+                            eval_path = os.path.join(save_path, 'val')
+                            eval_results = evaluate(unet=unet.module,
+                                                    bev_model=bev_model,
+                                                    noise_scheduler=DDIM_scheduler,
+                                                    dataset=val_dataset,
+                                                    dataloader=val_dataloader,
+                                                    bev_cfg=bev_cfg,
+                                                    eval='bbox',
+                                                    save_path=eval_path,
+                                                    noise_timesteps=5,
+                                                    denoise_timesteps=5,
+                                                    num_inference_steps=5,
+                                                    use_classifier_guidence=False)
 
-                    if accelerator.is_main_process and args.report_to == "wandb":
-                        for metric, score in eval_results.items():
-                            metric = f"val/{metric}"
-                            wandb.log({metric: score}, step=step_cnt)   
+                        if accelerator.is_main_process and args.report_to == "wandb":
+                            for metric, score in eval_results.items():
+                                metric = f"val/{metric}"
+                                wandb.log({metric: score}, step=step_cnt)   
+                    bev_model.train()
                     unet.train()                         
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "epoch":epoch}
+            logs = {"step_loss": loss.detach().item(), "diff_loss": denoise_loss.detach().item(), 
+                    "task_loss": task_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "epoch":epoch}
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
@@ -509,7 +568,7 @@ def parse_args():
                         help='test config file path')
     
     parser.add_argument('--bev_checkpoint', 
-                        default="",
+                        default=None,
                         help='checkpoint file')
     
     parser.add_argument('--pretrained_unet_checkpoint', 

@@ -33,6 +33,8 @@ import os.path as osp
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from projects.mmdet3d_plugin.core.evaluation.eval_hooks import CustomDistEvalHook
 from projects.mmdet3d_plugin.datasets import custom_build_dataset
+from mmcv.runner import IterTimerHook
+
 def custom_train_detector(model,
                    dataset,
                    cfg,
@@ -134,8 +136,8 @@ def custom_train_detector(model,
             cfg.runner,
             default_args=dict(
                 model=model,
-                model_target=model_target,
-                bev_diffuser=bev_diffuser,
+                # model_target=model_target,
+                # bev_diffuser=bev_diffuser,
                 optimizer=optimizer,
                 work_dir=cfg.work_dir,
                 logger=logger,
@@ -184,7 +186,9 @@ def custom_train_detector(model,
             'num_bboxes': cfg.num_bboxes,
             'test_mode': True,
         }
-        val_dataset = custom_build_dataset(cfg.data.val, dataset_default_args)
+
+        cfg.data.test.load_annos = True
+        val_dataset = custom_build_dataset(cfg.data.test, dataset_default_args)
 
         val_dataloader = build_dataloader(
             val_dataset,

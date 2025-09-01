@@ -45,7 +45,7 @@ def parse_args():
         help='Whether to fuse conv and bn, this will slightly increase'
         'the inference speed')
     parser.add_argument(
-        '--format-only',
+        '--format_only',
         action='store_true',
         help='Format the output results without perform evaluation. It is'
         'useful when you want to format the result to a specific format and '
