@@ -6,10 +6,10 @@ PORT=${PORT:-28508}
 CONFIG="./projects/configs/bevdiffuser/layout_tiny_pretrain_GTlayout.py"
 # LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
 RESUME_FROM=None
-RUN_NAME="BEVDiffuser_tiny_pretrain_1denoise_customlr"
+RUN_NAME="BEVDiffuser_tiny_pretrain_10denoise_customlr"
 WORK_DIR="../results_pretrain/${RUN_NAME}"
 
-DENOISE_WEIGHT=1.0
+DENOISE_WEIGHT=10.0
 
 export PYTHONWARNINGS="ignore"
 

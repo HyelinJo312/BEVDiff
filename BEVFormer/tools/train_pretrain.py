@@ -201,7 +201,7 @@ def main():
         cfg.optimizer['lr'] = cfg.optimizer['lr'] * len(cfg.gpu_ids) / 8
 
     if args.denoise_loss_weight is not None:
-        cfg.denoise_loss_weight_ = args.denoise_loss_weight
+        cfg.model.pts_bbox_head.denoise_loss_weight = args.denoise_loss_weight
 
     # cfg.setdefault('find_unused_parameters', True)
 

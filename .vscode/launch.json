@@ -2,33 +2,6 @@
 
     "version": "0.2.0",
     "configurations": [
-        {
-            "name": "Train",
-            "type": "debugpy",
-            "request": "launch",
-            //"module": "torch.distributed.launch",
-            //"justMyCode": true,
-            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser.py",
-            "console": "integratedTerminal",
-            "args": [
-            // "--nnodes", "1",
-            // "--node_rank", "0",
-            // "--nproc_per_node", "3",
-            // "--master_addr", "127.0.0.1",
-            // "--master_port", "29507",
-            // "--workers", "2"
-            "--bev_config", "BEVFormer/projects/configs/bevdiffuser/layout_tiny.py",
-            "--bev_checkpoint", "BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
-            "--pretrained_unet_checkpoint", "None",
-            "--gpus", "1",
-            "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-2-1"
-            ],
-
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0"
-            }
-        },
 
         {
             "name": "Train_bevdiffuser_pretrain", 

@@ -27,7 +27,13 @@ custom_imports = dict(
 
 custom_hooks = [
     dict(type='IterTimerHook', priority='VERY_HIGH'),
-    dict(type='FixUnetLrHook', unet_lr=1e-3, unet_attr_path='module.pts_bbox_head.unet')
+    # dict(type='FixUnetLrHook', unet_lr=1e-4, unet_attr_path='module.pts_bbox_head.unet')
+    dict(
+        type='FixUnetLrHook',
+        unet_lr=1e-4,
+        unet_attr_path='module.pts_bbox_head.unet',  # 단일GPU면 'pts_bbox_head.unet'
+        print_every=50
+    ),
 ]
 
 plugin = True
@@ -69,7 +75,7 @@ num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
 
-denoise_loss_weight_ = 1.0
+_denoise_loss_weight_ = 1.0
 
 model = dict(
     type='BEVDiffuser',
@@ -104,19 +110,23 @@ model = dict(
         sync_cls_avg_factor=True,
         with_box_refine=True,
         as_two_stage=False,
-        denoise_loss_weight=1.0,
+        denoise_loss_weight=_denoise_loss_weight_,
         return_multiscale=True,
         noise_scheduler=dict(
-            type='DDPMScheduler',
             from_pretrained='stabilityai/stable-diffusion-2-1',
             subfolder='scheduler',              
             prediction_type='sample'),
-        infer_scheduler=dict(
-            type='DDIMGuidedScheduler',        
-            from_pretrained='stabilityai/stable-diffusion-2-1',
-            subfolder='scheduler',
-            prediction_type='sample'),
-            # eta=0.0),  
+        # noise_scheduler=dict(
+        #     type='DDPMScheduler',
+        #     from_pretrained='stabilityai/stable-diffusion-2-1',
+        #     subfolder='scheduler',              
+        #     prediction_type='sample'),
+        # infer_scheduler=dict(
+        #     type='DDIMGuidedScheduler',        
+        #     from_pretrained='stabilityai/stable-diffusion-2-1',
+        #     subfolder='scheduler',
+        #     prediction_type='sample'),
+        #     # eta=0.0),  
         unet = dict(
             type='projects.bevdiffuser.layout_diffusion.layout_diffusion_unet.LayoutDiffusionUNetModel',
             parameters=dict(
@@ -250,20 +260,18 @@ model = dict(
             reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))),
-    test_cfg = dict(
-        pts=dict(),
+    test_cfg = dict(pts=dict(
         diffusion=dict(
             noise_timesteps=5,          
             denoise_timesteps=5,      
-            num_inference_steps=5,     
-            use_cfg=True,               
+            num_inference_steps=5,                  
             guidance_scale=2.0,
-            use_task_guidance=False)))    
+            use_task_guidance=False))))    
     
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-# data_root = 'data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+data_root = 'data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 train_pipeline = [
@@ -333,6 +341,7 @@ data = dict(
 optimizer = dict(
     type='AdamW',
     lr=2e-4, 
+    betas=(0.9, 0.999),
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
@@ -379,7 +388,7 @@ lr_config = dict(
 # runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 # checkpoint_config = dict(interval=1)
 
-runner = dict(type='IterBasedRunner', max_iters=70000)  # DiffBEV : 200,000
+runner = dict(type='IterBasedRunner', max_iters=100000)  # DiffBEV : 200,000
 
 evaluation = dict(
     interval=10000,

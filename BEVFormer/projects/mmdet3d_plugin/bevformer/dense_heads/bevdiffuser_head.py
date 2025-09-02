@@ -23,9 +23,10 @@ from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from mmcv.runner import force_fp32, auto_fp16
 from mmcv.utils import Registry, build_from_cfg
 import torch.nn.functional as F
+from diffusers import DDPMScheduler, DDIMScheduler
+from projects.bevdiffuser.scheduler_utils import DDIMGuidedScheduler
 from projects.bevdiffuser.layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
 from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
-from mmcv.utils import Registry
 from projects.bevdiffuser.fuser import CrossAttentionFusion, ConcatFusion
 FUSERS = Registry('fuser')
 FUSERS.register_module(CrossAttentionFusion)
@@ -48,7 +49,7 @@ class BEVDiffuserHead(BEVFormerHead):
                  unet=None,
                  fuser=None,
                  noise_scheduler=None,
-                 infer_scheduler=None,
+                #  infer_scheduler=None,
                  denoise_loss_weight=1.0,
                  return_multiscale=False,
                  **kwargs):
@@ -66,28 +67,38 @@ class BEVDiffuserHead(BEVFormerHead):
 
         self.fuser = build_from_cfg(fuser, FUSERS) if isinstance(fuser, dict) else fuser
 
-        self.noise_scheduler = self._build_noise_scheduler(noise_scheduler)
-        self.infer_scheduler = self._build_noise_scheduler(infer_scheduler)
-
         self.denoise_loss_weight = float(denoise_loss_weight)
-
         self.return_multiscale = return_multiscale
-
-        self.multi_scale = MultiScaleConcat(in_chs=(256, 512, 1024), 
-                                            out_dim=256, 
-                                            pick_idxs=(0, 1, 2), 
-                                            target_idx=0)
+        self.multi_scale = MultiScaleConcat(in_chs=(256, 512, 1024), out_dim=256, pick_idxs=(0, 1, 2), target_idx=0)
         
+        
+        # Load scheduler, tokenizer and models.
+        self.noise_scheduler = DDPMScheduler.from_pretrained(
+            noise_scheduler.from_pretrained, subfolder=noise_scheduler.subfolder
+        )
+        self.infer_scheduler = DDIMGuidedScheduler.from_pretrained(
+            noise_scheduler.from_pretrained, subfolder=noise_scheduler.subfolder
+        )
+        
+        if noise_scheduler.prediction_type == 'sample':
+            self.noise_scheduler.register_to_config(prediction_type='sample')
+            self.infer_scheduler.register_to_config(prediction_type='sample')
 
         # self._disable_inplace(self)
 
-
+    def init_weights(self):
+        """Initialize weights of the DeformDETR head."""
+        self.transformer.init_weights()
+        if self.loss_cls.use_sigmoid:
+            bias_init = bias_init_with_prob(0.01)
+            for m in self.cls_branches:
+                nn.init.constant_(m[-1].bias, bias_init)
+                
     def _build_noise_scheduler(self, cfg):
         if cfg is None:
             return None
         t = cfg.get('type', '')
         if t == 'DDPMScheduler':
-            from diffusers import DDPMScheduler
             sch = DDPMScheduler.from_pretrained(
                 cfg['from_pretrained'],
                 subfolder=cfg.get('subfolder', 'scheduler'))
@@ -95,7 +106,6 @@ class BEVDiffuserHead(BEVFormerHead):
                 sch.register_to_config(prediction_type=cfg['prediction_type'])
             return sch
         elif t == 'DDIMGuidedScheduler':
-            from projects.bevdiffuser.scheduler_utils import DDIMGuidedScheduler
             sch = DDIMGuidedScheduler.from_pretrained(
                 cfg['from_pretrained'],
                 subfolder=cfg.get('subfolder', 'scheduler'))
@@ -113,7 +123,7 @@ class BEVDiffuserHead(BEVFormerHead):
             if isinstance(m, nn.ReLU) and getattr(m, 'inplace', False):
                 m.inplace = False
     
-    def get_condition(self, kwargs, latents=None, use_cond=True):
+    def get_condition(self, kwargs, use_cond=True):
         cond = {}
         if 'layout_obj_classes' in kwargs:
             cond['obj_class'] = torch.stack(kwargs['layout_obj_classes'])
@@ -151,47 +161,99 @@ class BEVDiffuserHead(BEVFormerHead):
     def compute_denoise(self, latents, **cond):
         assert self.noise_scheduler is not None, \
             'noise_scheduler is required for training the diffuser'
-        # Sample noise that we'll add to the latents
-        noise = torch.randn_like(latents)
+            
+        with torch.cuda.amp.autocast(enabled=False):
+            latents = latents.float()    
+            
+            # Sample noise that we'll add to the latents
+            noise = torch.randn_like(latents)
 
-        bsz = latents.shape[0]
-        max_timestep = self.noise_scheduler.config.num_train_timesteps
-        timesteps = torch.randint(0, max_timestep, (bsz,), device=latents.device).long()
+            bsz = latents.shape[0]
+            max_timestep = self.noise_scheduler.config.num_train_timesteps
+            timesteps = torch.randint(0, max_timestep, (bsz,), device=latents.device).long()
 
-        noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+            noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
 
-        # Get the target for loss depending on the prediction type
-        ptype = getattr(self.noise_scheduler.config, 'prediction_type', 'epsilon')
-        if ptype == 'epsilon':
-            target = noise
-        elif ptype == 'sample':
-            target = latents
-        elif ptype == 'v_prediction':
-            target = self.noise_scheduler.get_velocity(latents, noise, timesteps)
-        else:
-            raise ValueError(f'Unknown prediction_type: {ptype}')
+            # Get the target for loss depending on the prediction type
+            ptype = getattr(self.noise_scheduler.config, 'prediction_type', 'epsilon')
+            if ptype == 'epsilon':
+                target = noise
+            elif ptype == 'sample':
+                target = latents
+            elif ptype == 'v_prediction':
+                target = self.noise_scheduler.get_velocity(latents, noise, timesteps)
+            else:
+                raise ValueError(f'Unknown prediction_type: {ptype}')
 
-        # Multi-scale features
-        if self.return_multiscale:  # UNet input: noisy_latents=(B, C, H, W)
-            multi_feats = self.unet(noisy_latents, timesteps, **cond)[0] 
-            pred = self.multi_scale(multi_feats)
-        else:
-            # Predict the noise residual and compute loss
-            pred = self.unet(noisy_latents, timesteps, **cond)[0]
+            # Multi-scale features
+            if self.return_multiscale:  # UNet input: noisy_latents=(B, C, H, W)
+                denoise_results = self.unet(noisy_latents, timesteps, **cond)[0] 
+                multi_feats = self.multi_scale(denoise_results)
+                pred = denoise_results[0]
+            else:
+                # Predict the noise residual and compute loss
+                pred = self.unet(noisy_latents, timesteps, **cond)[0]
 
-        # UNet는 FP32로 고정 (autocast off)
-        # with torch.cuda.amp.autocast(enabled=False):
-        #     pred = self.unet(noisy_latents.float(), timesteps, **cond)
-        #     pred = pred[0] if isinstance(pred, (list, tuple)) else pred
+            denoise_loss = F.mse_loss(pred.float(), target.float(), reduction='mean')
 
-        denoise_loss = F.mse_loss(pred.float(), target.float(), reduction='mean')
-        # return pred, denoise_loss
-        return pred, denoise_loss
+        return multi_feats, denoise_loss
 
+
+    def denoise_eval(self,latents, img_metas, cond, **kwargs) -> torch.Tensor:
+        """
+        Evaluation-time denoising (DDIM + CFG + optional task-guidance).
+        Args:
+            latents: (B, C, H, W) encoder BEV feature (no grad path)
+            cond:    conditioning dict for UNet
+            img_metas, **kwargs: passed down for optional task guidance
+        Returns:
+            denoised_bev: (B, C, H, W)
+        """
+        
+        if (self.unet is None) or (self.infer_scheduler is None):
+            return latents
+
+        diff_cfg = getattr(self, 'test_cfg', {}).get('diffusion', {})
+        noise_timesteps     = int(diff_cfg.get('noise_timesteps', 0) or 0)
+        denoise_timesteps   = int(diff_cfg.get('denoise_timesteps', 0) or 0)
+        num_inference_steps = int(diff_cfg.get('num_inference_steps', 0) or 0)
+        guidance_scale      = float(diff_cfg.get('guidance_scale', 2.0))
+        use_task_guidance   = bool(diff_cfg.get('use_task_guidance', False))
+
+        with torch.cuda.amp.autocast(enabled=False):
+            latents = latents.float()    
+            if noise_timesteps > 0:
+                if noise_timesteps > 1000:
+                    latents = torch.randn_like(latents)
+                    if hasattr(self.infer_scheduler, 'init_noise_sigma'):
+                        latents = latents * self.infer_scheduler.init_noise_sigma
+                else:
+                    noise = torch.randn_like(latents)
+                    noise_timesteps = torch.tensor(noise_timesteps, device=latents.device, dtype=torch.long)
+                    latents = self.infer_scheduler.add_noise(latents, noise, noise_timesteps)
+
+            # DDIM sampling
+            if denoise_timesteps > 0 and num_inference_steps > 0:
+                uncond = self.get_condition(kwargs, use_cond=False) 
+                
+                # DDIM
+                self.infer_scheduler.config.num_train_timesteps = int(denoise_timesteps)
+                self.infer_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
+
+                for t in self.infer_scheduler.timesteps:
+                    t_batch = torch.full((latents.shape[0],), int(t), device=latents.device, dtype=torch.long)
+                    noise_pred_uncond = self.unet(latents, t_batch, **uncond)[0][0]   
+                    noise_pred_cond   = self.unet(latents, t_batch, **cond)[0][0]
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    classifier_gradient = None
+                    if use_task_guidance:
+                        classifier_gradient = self._classifier_guidance_grad(latents, img_metas=img_metas, **kwargs)
+                    latents = self.infer_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
+        return latents
 
 
     @auto_fp16(apply_to=('mlvl_feats'))
-    def forward(self, mlvl_feats, img_metas, prev_bev=None,  only_bev=False, given_bev=None, **kwargs):
+    def forward(self, mlvl_feats, img_metas, prev_bev=None, only_bev=False, return_loss=True, **kwargs):
         """Forward function.
         Args:
             mlvl_feats (tuple[Tensor]): Features from the upstream
@@ -238,20 +300,20 @@ class BEVDiffuserHead(BEVFormerHead):
 
         latents = bev_embed.detach().clone()
 
-        cond = self.get_condition(kwargs, latents=None, use_cond=True) 
+        cond = self.get_condition(kwargs, use_cond=True) 
 
         # cond = self.cond_module(img, n_layers=4, return_tokens=False))
 
         denoise_loss = None
 
         # Training: add noise -> UNet -> denoised
-        if self.training and self.unet is not None and self.noise_scheduler is not None:
-            pred_latents, denoise_loss = self.compute_denoise(latents, **cond)
-            denoised_bev = pred_latents    # B, C, H, W
-
-        # Evaluation: DDIM sampling
-        elif not self.training and self.unet is not None and self.infer_scheduler is not None:
-            denoised_bev = self.denoise_eval(latents, cond, img_metas, **kwargs)
+        if return_loss:
+            multi_feats, denoise_loss = self.compute_denoise(latents, **cond)
+            denoised_bev = multi_feats    # B, C, H, W
+        # Evaluation: DDIM sampling    
+        else: 
+            with torch.no_grad():
+                denoised_bev = self.denoise_eval(latents, img_metas, cond, **kwargs)
 
         # Fuser: (original, denoised) -> fused (B,C,H,W)
         fused_bev = self.fuser(bev_embed, denoised_bev) if self.fuser is not None else denoised_bev
@@ -319,66 +381,6 @@ class BEVDiffuserHead(BEVFormerHead):
             outs['denoise_loss'] = denoise_loss
 
         return outs
-
-
-    def denoise_eval(self, latents: torch.Tensor, cond: dict, img_metas, **kwargs) -> torch.Tensor:
-        """
-        Evaluation-time denoising (DDIM + CFG + optional task-guidance).
-        Args:
-            latents: (B, C, H, W) encoder BEV feature (no grad path)
-            cond:    conditioning dict for UNet
-            img_metas, **kwargs: passed down for optional task guidance
-        Returns:
-            denoised_bev: (B, C, H, W)
-        """
-        
-        if (self.unet is None) or (self.infer_scheduler is None):
-            return latents
-
-        diff_cfg = getattr(self, 'test_cfg', {}).get('diffusion', {})
-        noise_timesteps     = int(diff_cfg.get('noise_timesteps', 0) or 0)
-        denoise_timesteps   = int(diff_cfg.get('denoise_timesteps', 0) or 0)
-        num_inference_steps = int(diff_cfg.get('num_inference_steps', 0) or 0)
-        use_cfg             = bool(diff_cfg.get('use_cfg', True))
-        guidance_scale      = float(diff_cfg.get('guidance_scale', 2.0))
-        use_task_guidance   = bool(diff_cfg.get('use_task_guidance', False))
-
-        if noise_timesteps > 0:
-            if noise_timesteps > 1000:
-                latents = torch.randn_like(latents)
-                if hasattr(self.infer_scheduler, 'init_noise_sigma'):
-                    latents = latents * self.infer_scheduler.init_noise_sigma
-            else:
-                noise = torch.randn_like(latents)
-                noise_timesteps = torch.tensor(noise_timesteps, device=latents.device, dtype=torch.long)
-                latents = self.infer_scheduler.add_noise(latents, noise, noise_timesteps)
-
-        # DDIM sampling
-        if denoise_timesteps > 0 and num_inference_steps > 0:
-          
-            self.infer_scheduler.config.num_train_timesteps = int(denoise_timesteps)
-            self.infer_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
-
-            uncond = self.get_condition(kwargs, latents, use_cond=False) if use_cfg else None
-
-            for t in self.infer_scheduler.timesteps:
-                t_batch = torch.full((latents.shape[0],), int(t), device=latents.device, dtype=torch.long)
-
-                if use_cfg and (uncond is not None):
-                    noise_pred_uncond = self.unet(latents, t_batch, **uncond)[0]
-                    noise_pred_cond   = self.unet(latents, t_batch, **cond)[0]
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-                else:
-                    out = self.unet(latents, t_batch, **cond)
-                    noise_pred = out[0] if isinstance(out, (tuple, list)) else out
-
-                classifier_gradient = None
-                if use_task_guidance:
-                    classifier_gradient = self._classifier_guidance_grad(latents, img_metas=img_metas, **kwargs)
-
-                latents = self.infer_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-
-        return latents
 
 
 
