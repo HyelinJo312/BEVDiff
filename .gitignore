@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+*.log
+*.pth
+
+ckpts/
+data/
+results_pretrain/
+results_pretrain_debug_v2/
+
+
