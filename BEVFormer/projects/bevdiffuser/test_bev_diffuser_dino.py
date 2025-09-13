@@ -11,10 +11,6 @@ Following code is adapted from
 https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_text_to_image.py
 '''
 
-'''
-Infernce 시 fusion module 제외한 상태
-'''
-
 import argparse
 import os, sys
 import time
@@ -33,7 +29,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from packaging import version
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import DDPMScheduler, DDIMScheduler, UNet2DConditionModel
+# from diffusers import DDPMScheduler, DDIMScheduler, UNet2DConditionModel
 
 import mmcv
 from mmcv import Config
@@ -47,9 +43,9 @@ from projects.mmdet3d_plugin.bevformer.apis.test import custom_encode_mask_resul
 from mmdet.apis import set_random_seed
 
 from scheduler_utils import DDIMGuidedScheduler
-from model_utils import get_bev_model, build_unet, get_bev_model_scratch
+from model_utils import get_bev_model, build_unet, instantiate_from_config
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
-from fuser import CrossAttentionFusion, ConcatFusion
+from projects.bevdiffuser.fm_feature import GetDINOv2Cond
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -173,18 +169,13 @@ def test():
         bev_model.requires_grad_(False)
     bev_model.eval()
     
-    fuser = CrossAttentionFusion(d_model=bev_cfg._dim_)
-    checkpoint_path = os.path.join(args.checkpoint_dir, "fuser.pth")
-    load_checkpoint(fuser, checkpoint_path, map_location='cpu')
-    fuser.to(bev_model.device, dtype=torch.float32)
-    fuser.requires_grad_(False)
-    fuser.eval()
-    
-    unet = build_unet(bev_cfg.unet)
+    unet = instantiate_from_config(bev_cfg.unet)
     unet.from_pretrained(args.checkpoint_dir, subfolder="unet")
     unet.to(bev_model.device, dtype=torch.float32)
     unet.requires_grad_(False) 
     unet.eval()
+    
+    get_dino = GetDINOv2Cond()
     
     bev_cfg.data.test.test_mode = True
     bev_cfg.data.test.load_annos = True
@@ -208,7 +199,7 @@ def test():
         
     evaluate(unet=unet,
              bev_model=bev_model,
-             fuser=fuser,
+             get_dino=get_dino,
              noise_scheduler=noise_scheduler,
              dataset=dataset,
              dataloader=dataloader,
@@ -223,7 +214,7 @@ def test():
 
 def evaluate(unet,
              bev_model,
-             fuser,
+             get_dino,
              noise_scheduler,
              dataset,
              dataloader,
@@ -288,14 +279,24 @@ def evaluate(unet,
     
     for step, batch in enumerate(dataloader):
         
-        # latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
-        bev_embed = bev_model(return_loss=False, only_bev=True, **batch)   # detach 필요할지 확인 필요
+        latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
         
-        bev_embed = bev_embed.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)
+        latents = latents.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)
         
-        bev_embed = bev_embed.permute(0, 3, 1, 2) # B, C, H, W
+        latents = latents.permute(0, 3, 1, 2)
+
+        img = batch['img'][0].data[0]
+        img_metas = batch['img_metas'][0].data[0]
         
-        latents = bev_embed.detach().clone()
+        def get_dino_uncond(cond):
+            uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                     for k, v in cond.items()}
+            last_cls_u = torch.zeros_like(cond['last_cls'])  # (B,V,C_in)
+            last_tokens_u = torch.zeros_like(cond['last_tokens'])  # (B,V,N,C_in)
+            uncond['last_cls'] = last_cls_u
+            uncond['last_tokens'] = last_tokens_u
+            return uncond
+        
         
         if noise_timesteps > 0:
             if noise_timesteps > 1000:
@@ -306,8 +307,9 @@ def evaluate(unet,
                 noise_timesteps = torch.tensor(noise_timesteps).long()   
                 latents = noise_scheduler.add_noise(latents, noise, noise_timesteps)
         
-        if denoise_timesteps > 0:        
-            cond, uncond = get_condition(batch, use_cond=True), get_condition(batch, use_cond=False)
+        if denoise_timesteps > 0:    
+            cond = get_dino(img, img_metas)    
+            uncond = get_dino_uncond(cond)
             
             # # DDIM
             noise_scheduler.config.num_train_timesteps=denoise_timesteps
@@ -319,17 +321,11 @@ def evaluate(unet,
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-        
-        # latents = latents.permute(0, 2, 3, 1)            
-        # latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)  
-        
-        # Feature fusion
-        fused_bev = fuser(bev_embed, latents)
-        fused_bev = fused_bev.permute(0, 2, 3, 1)            
-        fused_bev = fused_bev.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)    # B, H, W, C
-        
+    
         # get detection results
-        det_result = bev_model(return_loss=False, only_bev=False, given_bev=fused_bev, rescale=True, **batch)
+        latents = latents.permute(0, 2, 3, 1)            
+        latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
+        det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
         
         if isinstance(det_result, dict):
             if 'bbox_results' in det_result.keys():

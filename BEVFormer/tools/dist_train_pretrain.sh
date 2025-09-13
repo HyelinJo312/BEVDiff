@@ -6,10 +6,14 @@ PORT=${PORT:-28508}
 CONFIG="./projects/configs/bevdiffuser/layout_tiny_pretrain_GTlayout.py"
 # LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
 RESUME_FROM=None
-RUN_NAME="BEVDiffuser_tiny_pretrain_10denoise_customlr"
+RUN_NAME="BEVDiffuser_pretrained-tiny_1denoise_customlr"
 WORK_DIR="../results_pretrain/${RUN_NAME}"
+BEV_CHECKPOINT="./ckpts/bevformer_tiny_epoch_24.pth"
+# BEV_CHECKPOINT=None
+# UNET_CHECKPOINT="./ckpts"
+UNET_CHECKPOINT=None
 
-DENOISE_WEIGHT=10.0
+DENOISE_WEIGHT=1.0
 
 export PYTHONWARNINGS="ignore"
 
@@ -30,6 +34,8 @@ torchrun --nproc_per_node=4 --master_port=29505 \
     --deterministic \
     --work_dir $WORK_DIR \
     --denoise_loss_weight $DENOISE_WEIGHT \
+    --bev_checkpoint $BEV_CHECKPOINT \
+    --unet_checkpoint $UNET_CHECKPOINT \
     --report_to 'tensorboard' \
     # --load_from=$LOAD_FROM \
     # --resume_from=$RESUME_FROM \

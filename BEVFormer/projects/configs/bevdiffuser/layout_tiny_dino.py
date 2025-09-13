@@ -11,24 +11,7 @@ _base_ = [
     '../datasets/custom_nus-3d.py',
     '../_base_/default_runtime.py'
 ]
-
-
-custom_imports = dict(
-    imports=[
-        'projects.mmdet3d_plugin',                 
-        'projects.bevdiffuser.layout_diffusion',   
-        'projects.bevdiffuser.fuser',    
-        'projects.bevdiffuser.scheduler_utils',         
-        'projects.logger'
-    ],
-    allow_failed_imports=False
-)
-
-custom_hooks = [
-    dict(type='IterTimerHook', priority='VERY_HIGH'),
-    dict(type='FixUnetLrHook', unet_lr=1e-4),
-]
-
+#
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
 
@@ -68,10 +51,36 @@ num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
 
-denoise_loss_weight_ = 1.0
+unet = dict(
+    type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
+    parameters=dict(
+        image_size=bev_h_,
+        use_fp16=False,
+        use_scale_shift_norm=True,
+        in_channels=_dim_,
+        out_channels=_dim_,
+        model_channels=256,
+        context_dim=256,
+        # encoder_channels=256, # assert same as layout_encoder.hidden_dim
+        num_head_channels=32,
+        num_heads=-1,
+        num_heads_upsample=-1,
+        num_res_blocks=2,
+        num_attention_blocks=1,
+        resblock_updown=True,
+        use_spatial_transformer=True,
+        num_pre_downsample=0,
+        attention_resolutions=[ 4, 2, 1 ],
+        channel_mult=[ 1, 2, 4 ],
+        dropout=0.0,
+        use_checkpoint=False,
+        # use_positional_embedding_for_attention=True,
+        # attention_block_type='ObjectAwareCrossAttention',
+        return_multiscale=True,)
+)
 
 model = dict(
-    type='BEVDiffuser',
+    type='BEVFormer',
     use_grid_mask=True,
     video_test_mode=True,
     # pretrained=dict(img='torchvision://resnet50'),
@@ -84,7 +93,7 @@ model = dict(
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
         style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')),
+        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')), 
     img_neck=dict(
         type='FPN',
         in_channels=[2048],
@@ -94,7 +103,7 @@ model = dict(
         num_outs=_num_levels_,
         relu_before_extra_convs=True),
     pts_bbox_head=dict(
-        type='BEVDiffuserHead',
+        type='BEVFormerHead',
         bev_h=bev_h_,
         bev_w=bev_w_,
         num_query=900,
@@ -103,51 +112,6 @@ model = dict(
         sync_cls_avg_factor=True,
         with_box_refine=True,
         as_two_stage=False,
-        denoise_loss_weight=1.0,
-        return_multiscale=True,
-        noise_scheduler=dict(
-            type='DDPMScheduler',
-            from_pretrained='stabilityai/stable-diffusion-2-1',
-            subfolder='scheduler',              
-            prediction_type='sample'),
-        infer_scheduler=dict(
-            type='DDIMGuidedScheduler',        
-            from_pretrained='stabilityai/stable-diffusion-2-1',
-            subfolder='scheduler',
-            prediction_type='sample'),
-            # eta=0.0),  
-        unet = dict(
-            type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
-            parameters=dict(
-                image_size=bev_h_,
-                use_fp16=False,
-                use_scale_shift_norm=True,
-                in_channels=_dim_,
-                out_channels=_dim_,
-                model_channels=256,
-                context_dim=256,
-                # encoder_channels=256, # assert same as layout_encoder.hidden_dim
-                num_head_channels=32,
-                num_heads=-1,
-                num_heads_upsample=-1,
-                num_res_blocks=2,
-                num_attention_blocks=1,
-                resblock_updown=True,
-                use_spatial_transformer=True,
-                num_pre_downsample=0,
-                attention_resolutions=[ 4, 2, 1 ],
-                channel_mult=[ 1, 2, 4 ],
-                dropout=0.0,
-                use_checkpoint=False,
-                # use_positional_embedding_for_attention=True,
-                # attention_block_type='ObjectAwareCrossAttention',
-                return_multiscale=True,)),
-        fuser=dict(
-            type='ConcatFusion',
-            in_channels=_dim_,
-            hidden_dim=_dim_,
-            out_channels=_dim_,
-            norm='group'),
         transformer=dict(
             type='PerceptionTransformer',
             rotate_prev_bev=True,
@@ -199,6 +163,7 @@ model = dict(
                             embed_dims=_dim_,
                             num_levels=1),
                     ],
+
                     feedforward_channels=_ffn_dim_,
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
@@ -235,22 +200,13 @@ model = dict(
             cls_cost=dict(type='FocalLossCost', weight=2.0),
             reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
-            pc_range=point_cloud_range))),
-    test_cfg = dict(
-        pts=dict(),
-        diffusion=dict(
-            noise_timesteps=5,          
-            denoise_timesteps=5,      
-            num_inference_steps=5,     
-            use_cfg=True,               
-            guidance_scale=2.0,
-            use_task_guidance=False)))    
-    
+            pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-# data_root = 'data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+data_root = '../../data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
+
 
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -286,8 +242,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=4, 
+    samples_per_gpu=1,
+    workers_per_gpu=4,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -318,112 +274,31 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=2e-4, 
+    lr=2e-4,
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1),
-            # 'pts_bbox_head.unet': dict(lr_mult=1.0), 
-            # 'pts_bbox_head.fuser': dict(lr_mult=1.0)
         }),
     weight_decay=0.01)
 
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
-
 # learning policy
 lr_config = dict(
     policy='CosineAnnealing',
     warmup='linear',
-    warmup_iters=1500,    # 500 for epoch-based
+    warmup_iters=500,
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
+total_epochs = 24
+evaluation = dict(interval=1, pipeline=test_pipeline)
 
-# total_epochs = 1
-
-# evaluation = dict(interval=total_epochs, pipeline=test_pipeline)
-# runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
-# checkpoint_config = dict(interval=1)
-
-runner = dict(type='IterBasedRunner', max_iters=50000)  # DiffBEV : 200,000
-
-evaluation = dict(
-    interval=10000,
-    by_epoch=False,
-    pipeline=test_pipeline
-)
-
-checkpoint_config = dict(
-    by_epoch=False,
-    interval=10000,
-    max_keep_ckpts=3,
-    save_last=True
-)
+runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
 log_config = dict(
     interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
-        # dict(type='CompactTextLoggerHook'),
         dict(type='TensorboardLoggerHook')
     ])
 
-
-
-"""
-step 기준 학습
-
-optimizer = dict(
-    type='AdamW',
-    lr=2e-4,
-    betas=(0.9, 0.999),
-    weight_decay=0.01
-)
-
-optimizer_config = dict(
-    grad_clip=dict(max_norm=35, norm_type=2)
-)
-
-lr_config = dict(
-    policy='CosineAnnealing',
-    by_epoch=False,
-    warmup='linear',
-    warmup_iters=1500,
-    warmup_ratio=1.0 / 3,
-    min_lr_ratio=1e-3
-)
-
-runner = dict(type='IterBasedRunner', max_iters=50000)  # DiffBEV : 200,000
-workflow = [('train', 1)]
-
-evaluation = dict(
-    interval=10000,
-    by_epoch=False,
-    pipeline=test_pipeline
-)
-
-log_config = dict(
-    interval=50,
-    hooks=[
-        dict(type='TextLoggerHook'),
-        dict(type='TensorboardLoggerHook')
-    ]
-)
-
-checkpoint_config = dict(
-    by_epoch=False,
-    interval=10000,
-    max_keep_ckpts=3,
-    save_last=True
-)
-
-
-# (선택)
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2), cumulative_iters=1)
-
-optimizer_config = dict(
-    type='GradientCumulativeOptimizerHook',
-    cumulative_iters=2,                     # 2 step 누적 = 1번 업데이트
-    grad_clip=dict(max_norm=35, norm_type=2)
-)
-
-
-"""
+checkpoint_config = dict(interval=1)

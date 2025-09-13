@@ -9,12 +9,13 @@
 import copy
 import torch
 import torch.nn as nn
+import os
 
 from mmcv.cnn import Linear, bias_init_with_prob
 from mmcv.utils import TORCH_VERSION, digit_version
 from mmdet.core import (multi_apply, multi_apply, reduce_mean)
 from mmdet.models.utils.transformer import inverse_sigmoid
-from mmdet.models import HEADS
+from mmdet.models import HEADS, FUSERS
 from mmcv.utils import ConfigDict
 from projects.mmdet3d_plugin.bevformer.dense_heads.bevformer_head import BEVFormerHead
 from projects.bevdiffuser.model_utils import build_unet, instantiate_from_config
@@ -28,9 +29,9 @@ from projects.bevdiffuser.scheduler_utils import DDIMGuidedScheduler
 from projects.bevdiffuser.layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
 from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
 from projects.bevdiffuser.fuser import CrossAttentionFusion, ConcatFusion
-FUSERS = Registry('fuser')
-FUSERS.register_module(CrossAttentionFusion)
-FUSERS.register_module(ConcatFusion)
+# FUSERS = Registry('fuser')
+# FUSERS.register_module(CrossAttentionFusion)
+# FUSERS.register_module(ConcatFusion)
 
 
 
@@ -60,10 +61,13 @@ class BEVDiffuserHead(BEVFormerHead):
             raise ValueError("`unet` config is required for BEVDiffuserHead")
         self.unet = build_unet(ConfigDict(unet))
         # self.unet = instantiate_from_config(ConfigDict(unet))
-        pretrained = unet.get('pretrained', None)
-        if pretrained:
-            state = torch.load(pretrained, map_location='cpu')
-            self.unet.load_state_dict(state, strict=False)
+            
+        if unet.pretrained:
+            self.unet.from_pretrained(unet.pretrained_checkpoint, subfolder="unet")
+            # train only the downsample and upsample layers
+            self.unet.requires_grad_(True)
+            # self.unet.downsample_blocks.requires_grad_(True)
+            # self.unet.upsample_blocks.requires_grad_(True)
 
         self.fuser = build_from_cfg(fuser, FUSERS) if isinstance(fuser, dict) else fuser
 
@@ -217,6 +221,7 @@ class BEVDiffuserHead(BEVFormerHead):
         noise_timesteps     = int(diff_cfg.get('noise_timesteps', 0) or 0)
         denoise_timesteps   = int(diff_cfg.get('denoise_timesteps', 0) or 0)
         num_inference_steps = int(diff_cfg.get('num_inference_steps', 0) or 0)
+        ddim_sampling_eta = float(diff_cfg.get('ddim_sampling_eta', 1.0) or 0.0)
         guidance_scale      = float(diff_cfg.get('guidance_scale', 2.0))
         use_task_guidance   = bool(diff_cfg.get('use_task_guidance', False))
 
@@ -248,7 +253,7 @@ class BEVDiffuserHead(BEVFormerHead):
                     classifier_gradient = None
                     if use_task_guidance:
                         classifier_gradient = self._classifier_guidance_grad(latents, img_metas=img_metas, **kwargs)
-                    latents = self.infer_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
+                    latents = self.infer_scheduler.step(noise_pred, t, latents, eta=ddim_sampling_eta, return_dict=False, classifier_gradient=classifier_gradient)[0]
         return latents
 
 
@@ -307,7 +312,8 @@ class BEVDiffuserHead(BEVFormerHead):
         denoise_loss = None
 
         # Training: add noise -> UNet -> denoised
-        if return_loss:
+        # if return_loss:
+        if self.training:
             multi_feats, denoise_loss = self.compute_denoise(latents, **cond)
             denoised_bev = multi_feats    # B, C, H, W
         # Evaluation: DDIM sampling    

@@ -41,10 +41,72 @@ class FixUnetLrHook(Hook):
         for gi in self._unet_group_indices:
             runner.optimizer.param_groups[gi]['lr'] = self.unet_lr
 
-        # 주기적으로 그룹별 LR 출력
-        # if runner.iter % self.print_every == 0:
-        #     lrs = [g['lr'] for g in runner.optimizer.param_groups]
-        #     runner.logger.info(f'[DEBUG] iter={runner.iter} group LRs={lrs}')
-        #     if self._unet_group_indices:
-        #         unet_lrs = [runner.optimizer.param_groups[gi]['lr'] for gi in self._unet_group_indices]
-        #         runner.logger.info(f'[DEBUG] UNet LRs={unet_lrs}')
+
+# @HOOKS.register_module()
+# class FixUnetLrHook(Hook):
+#     priority = 'VERY_LOW'  
+
+#     def __init__(self, unet_lr=1e-3, unet_attr_path='module.pts_bbox_head.unet', print_every=100):
+#         self.unet_lr = unet_lr
+#         self.unet_attr_path = unet_attr_path
+#         self._unet_param_ids = None
+#         self._unet_group_indices = None
+#         self.print_every = print_every
+
+#     def _resolve_unet(self, model):
+#         parts = self.unet_attr_path.split('.')
+#         obj = model
+#         try:
+#             for n in parts:
+#                 obj = getattr(obj, n)
+#             return obj
+#         except AttributeError:
+#             pass
+#         if parts and parts[0] == 'module':
+#             obj = model
+#             for n in parts[1:]:
+#                 obj = getattr(obj, n)
+#             return obj
+#         # 3) model.module 경로 시도
+#         if hasattr(model, 'module'):
+#             obj = model.module
+#             for n in parts:
+#                 obj = getattr(obj, n)
+#             return obj
+#         raise AttributeError(f"[FixUnetLrHook] Cannot resolve path: {self.unet_attr_path}")
+
+#     def before_run(self, runner):
+#         unet = self._resolve_unet(runner.model)
+#         unet_params = list(unet.parameters())
+#         self._unet_param_ids = set(id(p) for p in unet_params)
+
+#         self._unet_group_indices = []
+#         for gi, g in enumerate(runner.optimizer.param_groups):
+#             params = g['params']
+#             if any(id(p) in self._unet_param_ids for p in params):
+#                 self._unet_group_indices.append(gi)
+
+#         if len(self._unet_group_indices) == 0:
+#             runner.logger.warning(
+#                 '[FixUnetLrHook] No optimizer param_group matched UNet params. '
+#                 'Check unet_attr_path or your model structure.'
+#             )
+#         else:
+#             for gi in self._unet_group_indices:
+#                 runner.optimizer.param_groups[gi]['lr'] = self.unet_lr
+
+#     def before_train_epoch(self, runner):
+#         """EpochBasedRunner"""
+#         if not self._unet_group_indices:
+#             return
+#         for gi in self._unet_group_indices:
+#             runner.optimizer.param_groups[gi]['lr'] = self.unet_lr
+
+#     def before_train_iter(self, runner):
+#         """IterBasedRunner"""
+#         if not self._unet_group_indices:
+#             return
+#         for gi in self._unet_group_indices:
+#             runner.optimizer.param_groups[gi]['lr'] = self.unet_lr
+#         if self.print_every and (runner.iter % self.print_every == 0):
+#             runner.logger.info(f'[FixUnetLrHook] (iter={runner.iter}) force UNet lr={self.unet_lr:.3e}')

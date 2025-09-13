@@ -26,8 +26,8 @@ custom_imports = dict(
 )
 
 custom_hooks = [
-    dict(type='IterTimerHook', priority='VERY_HIGH'),
-    # dict(type='FixUnetLrHook', unet_lr=1e-4, unet_attr_path='module.pts_bbox_head.unet')
+    # dict(type='IterTimerHook', priority='VERY_HIGH'),
+    dict(type='FixUnetLrHook', unet_lr=1e-4, unet_attr_path='module.pts_bbox_head.unet'),
     dict(
         type='FixUnetLrHook',
         unet_lr=1e-4,
@@ -387,26 +387,12 @@ lr_config = dict(
 #     min_lr=0.0,
 #     by_epoch=False)
 
-# total_epochs = 1
+total_epochs = 12
 
-# evaluation = dict(interval=total_epochs, pipeline=test_pipeline)
-# runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
-# checkpoint_config = dict(interval=1)
+evaluation = dict(interval=3, pipeline=test_pipeline)
+runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
+checkpoint_config = dict(interval=3)
 
-runner = dict(type='IterBasedRunner', max_iters=100000)  # DiffBEV : 200,000
-
-evaluation = dict(
-    interval=50000,
-    by_epoch=False,
-    pipeline=test_pipeline
-)
-
-checkpoint_config = dict(
-    by_epoch=False,
-    interval=50000,
-    max_keep_ckpts=3,
-    save_last=True
-)
 
 log_config = dict(
     interval=50,
@@ -417,63 +403,3 @@ log_config = dict(
     ])
 
 
-
-"""
-step 기준 학습
-
-optimizer = dict(
-    type='AdamW',
-    lr=2e-4,
-    betas=(0.9, 0.999),
-    weight_decay=0.01
-)
-
-optimizer_config = dict(
-    grad_clip=dict(max_norm=35, norm_type=2)
-)
-
-lr_config = dict(
-    policy='CosineAnnealing',
-    by_epoch=False,
-    warmup='linear',
-    warmup_iters=1500,
-    warmup_ratio=1.0 / 3,
-    min_lr_ratio=1e-3
-)
-
-runner = dict(type='IterBasedRunner', max_iters=50000)  # DiffBEV : 200,000
-workflow = [('train', 1)]
-
-evaluation = dict(
-    interval=10000,
-    by_epoch=False,
-    pipeline=test_pipeline
-)
-
-log_config = dict(
-    interval=50,
-    hooks=[
-        dict(type='TextLoggerHook'),
-        dict(type='TensorboardLoggerHook')
-    ]
-)
-
-checkpoint_config = dict(
-    by_epoch=False,
-    interval=10000,
-    max_keep_ckpts=3,
-    save_last=True
-)
-
-
-# (선택)
-optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2), cumulative_iters=1)
-
-optimizer_config = dict(
-    type='GradientCumulativeOptimizerHook',
-    cumulative_iters=2,                     # 2 step 누적 = 1번 업데이트
-    grad_clip=dict(max_norm=35, norm_type=2)
-)
-
-
-"""

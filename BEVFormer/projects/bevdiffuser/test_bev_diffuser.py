@@ -29,7 +29,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from packaging import version
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import DDPMScheduler, DDIMScheduler, UNet2DConditionModel
+# from diffusers import DDPMScheduler, DDIMScheduler, UNet2DConditionModel
 
 import mmcv
 from mmcv import Config
@@ -43,8 +43,9 @@ from projects.mmdet3d_plugin.bevformer.apis.test import custom_encode_mask_resul
 from mmdet.apis import set_random_seed
 
 from scheduler_utils import DDIMGuidedScheduler
-from model_utils import get_bev_model, build_unet
+from model_utils import get_bev_model, build_unet, instantiate_from_config
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
+from projects.bevdiffuser.fm_feature import GetDINOv2Cond
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -302,33 +303,6 @@ def evaluate(unet,
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-        
-        # --------------------------------------------------------------------------------------------------------------------------------
-        # if denoise_timesteps > 0:
-        #     cond, uncond = get_condition(batch, use_cond=True), get_condition(batch, use_cond=False)
-            
-        #     # # DDIM
-        #     noise_scheduler.config.num_train_timesteps = denoise_timesteps
-        #     noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
-
-        #     for _, t in enumerate(noise_scheduler.timesteps):
-        #         t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-        #         pred_uncond, pred_cond = unet(latents, t_batch, **uncond)[0], unet(latents, t_batch, **cond)[0]
-        #         pred = pred_uncond + 2 * (pred_cond - pred_uncond)  # classifier-free guidance
-        #         classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
-        #         if noise_scheduler.config.prediction_type == "epsilon":
-        #             # DDIM-style denoising: noise prediction
-        #             alpha_bar = noise_scheduler.alphas_cumprod[t].to(latents.device)
-        #             sqrt_alpha_bar = torch.sqrt(alpha_bar).view(-1, 1, 1, 1)
-        #             sqrt_one_minus_alpha_bar = torch.sqrt(1.0 - alpha_bar).view(-1, 1, 1, 1)
-        #             x0_pred = (latents - sqrt_one_minus_alpha_bar * pred) / sqrt_alpha_bar
-        #             latents = x0_pred  # OR latents = blend(latents, x0_pred)
-        #         elif noise_scheduler.config.prediction_type == "sample":
-        #             latents = noise_scheduler.step(pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-        #         else:
-        #             raise ValueError(f"Unsupported prediction_type: {noise_scheduler.config.prediction_type}")
-        
-        # --------------------------------------------------------------------------------------------------------------------------------
     
         # get detection results
         latents = latents.permute(0, 2, 3, 1)            

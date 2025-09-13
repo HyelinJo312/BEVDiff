@@ -11,18 +11,6 @@ Following code is adapted from
 https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_text_to_image.py
 '''
 
-'''
-
-Version 3 Code:
-
-Use pre-trained BEVFormer
-
-Fusion module between original BEV feature and denosied feature 
-
-Customized learning rate scheduler for BEV model and U-Net
-
-'''
-
 import argparse
 import logging
 import math
@@ -51,9 +39,9 @@ from datasets import load_dataset
 from packaging import version
 from torchvision import transforms
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import AutoencoderKL, DDPMScheduler, DDIMScheduler, UNet2DConditionModel
+from diffusers import DDPMScheduler
 from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel
+# from diffusers.training_utils import EMAModel
 
 from mmcv import Config, DictAction
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
@@ -65,16 +53,15 @@ from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from mmdet.apis import set_random_seed
 
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
+from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from scheduler_utils import DDIMGuidedScheduler
-from model_utils import get_bev_model, build_unet, get_bev_model_scratch, unwrap_mmdet_batch, freeze_bn_stats
-from test_bev_diffuser_v2 import evaluate
+from model_utils import get_bev_model, build_unet, instantiate_from_config
+from test_bev_diffuser_dino import evaluate
 from torch.utils.tensorboard import SummaryWriter
-from BEVFormer.projects.bevdiffuser.fuser import CrossAttentionFusion, ConcatFusion
-from lr_scheduler import get_cosine_annealing_with_warmup_scheduler, get_cyclic_scheduler, get_step_scheduler
-from optimizer_utils import *
-from mmcv.parallel import DataContainer
+from projects.bevdiffuser.fm_feature import GetDINOv2Cond
 
-# logger = get_logger(__name__, log_level="INFO")
+
+logger = get_logger(__name__, log_level="INFO")
 
 def train():
     args = parse_args()
@@ -87,15 +74,11 @@ def train():
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
-    from accelerate.utils import DistributedDataParallelKwargs  
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=None,
         log_with=args.report_to,
         project_config=accelerator_project_config,
-        kwargs_handlers=[ddp_kwargs]
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -104,19 +87,6 @@ def train():
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-
-    logger = get_logger(__name__, log_level="INFO")
-    logging.getLogger().setLevel(logging.INFO)
-    logger.logger.setLevel(logging.INFO)
-    for h in logging.getLogger().handlers:
-        h.setLevel(logging.INFO)
-
-    if not logger.logger.handlers:
-        sh = logging.StreamHandler(sys.stdout)
-        sh.setLevel(logging.INFO)
-        sh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
-        logger.logger.addHandler(sh)
-    logger.logger.propagate = True
     logger.info(accelerator.state, main_process_only=False)
 
     # change output dir first
@@ -156,46 +126,44 @@ def train():
     if args.prediction_type is not None:
         noise_scheduler.register_to_config(prediction_type=args.prediction_type)
         DDIM_scheduler.register_to_config(prediction_type=args.prediction_type)
+        
+    bev_model = get_bev_model(args)
 
-    # Load scratch BEV model
-    bev_model = get_bev_model_scratch(args)
-    bev_model.requires_grad_(True)
-    logger.info(f"Successfully load BEVFormer without pre-trained weights", main_process_only=False)
+    # Freeze vae and text_encoder
+    bev_model.requires_grad_(False)
+    if args.task_loss_scale != 0:
+        bev_model.module.pts_bbox_head.transformer.decoder.requires_grad_(True)
+        bev_model.module.pts_bbox_head.transformer.reference_points.requires_grad_(True)
+        bev_model.module.pts_bbox_head.cls_branches.requires_grad_(True)
+        bev_model.module.pts_bbox_head.reg_branches.requires_grad_(True)
     
-    # Feature fusion module
-    import torch.nn as nn
-    fuser = ConcatFusion(in_channels=bev_cfg._dim_, hidden_dim=bev_cfg._dim_, out_channels=bev_cfg._dim_)
-    # fuser = CrossAttentionFusion(d_model=bev_cfg._dim_)
-    fuser.requires_grad_(True)
+    def get_task_loss(x, **kwargs):
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = x.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
+        losses = bev_model(return_loss=True, given_bev=x, **kwargs)
+        loss, _ = bev_model.module._parse_losses(losses)
+        return loss
     
-
-    # Build U-Net model
-    unet = build_unet(bev_cfg.unet)
+    unet = instantiate_from_config(bev_cfg.unet)
     if args.pretrained_unet_checkpoint is not None and (os.path.isfile(args.pretrained_unet_checkpoint) or os.path.isdir(args.pretrained_unet_checkpoint)):
         unet.from_pretrained(args.pretrained_unet_checkpoint, subfolder="unet")
         # train only the downsample and upsample layers
         unet.requires_grad_(False)
         unet.downsample_blocks.requires_grad_(True)
         unet.upsample_blocks.requires_grad_(True)
+        
+    # Get DINOv2 feature extractor
+    get_dino = GetDINOv2Cond()
 
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
-    
-    def get_task_loss(x, **kwargs):
-        x = x.permute(0, 2, 3, 1).contiguous()
-        x = x.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-        with freeze_bn_stats(bev_model, accelerator):
-            losses = bev_model(return_loss=True, given_bev=x.clone(), **kwargs)  
-        # loss, _ = bev_model.module._parse_losses(losses)
-        base = accelerator.unwrap_model(bev_model) 
-        loss, _ = base._parse_losses(losses)
-        return loss
-    
+
+    # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
         for i, model in enumerate(models):
-            if hasattr(model, "save_pretrained"):
-                model.save_pretrained(os.path.join(output_dir, "unet"))
-                weights.pop()
+            model.save_pretrained(os.path.join(output_dir, "unet"))
 
+            # make sure to pop weight so that corresponding model is not saved again
+            weights.pop()
 
     def load_model_hook(models, input_dir):
         for i in range(len(models)):
@@ -209,60 +177,37 @@ def train():
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
 
-    # Without Fuser
-    # optimizer, bev_groups_count = build_joint_optimizer(
-    #     unet=unet,
-    #     bev_model=bev_model,
-    #     bev_optimizer_cfg=bev_cfg.optimizer,     
-    #     unet_lr=args.learning_rate,           
-    #     unet_betas=(args.adam_beta1, args.adam_beta2),
-    #     unet_weight_decay=args.adam_weight_decay, 
-    #     unet_eps=args.adam_epsilon,
-    # )
+    optimizer_cls = torch.optim.AdamW
 
-    optimizer, bev_groups_count, fuser_groups_count = build_joint_optimizer(
-        unet=unet,
-        bev_model=bev_model,
-        fuser=fuser,
-        bev_optimizer_cfg=bev_cfg.optimizer,         # mmdet paramwise_cfg 그대로 반영
-        unet_lr=args.learning_rate,                  # 예: 1e-3(상수) 또는 args 값
-        unet_betas=(args.adam_beta1, args.adam_beta2),
-        unet_weight_decay=args.adam_weight_decay,
-        unet_eps=args.adam_epsilon,
+    trained_params = list(unet.parameters())
+    if args.task_loss_scale != 0:
+        trained_params += list(bev_model.parameters())
+    
+    learning_rate = args.learning_rate
+
+    optimizer = optimizer_cls(
+        trained_params,
+        lr=learning_rate,
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.adam_weight_decay,
+        eps=args.adam_epsilon,
     )
 
-    lambda_unet = lambda step: 1.0  
-    lambda_bev  = lambda step: cosine_warmup_lambda(
-                                                step, total_iters=args.max_train_steps,
-                                                warmup_iters=bev_cfg.lr_config['warmup_iters'], 
-                                                warmup_ratio=bev_cfg.lr_config['warmup_ratio'],
-                                                min_lr_ratio=bev_cfg.lr_config['min_lr_ratio']
-                                            )
-    # Without Fuser
-    # lr_scheduler = build_groupwise_lambda_scheduler(
-    #     optimizer, 
-    #     lambda_unet=lambda_unet, 
-    #     lambda_bev=lambda_bev,
-    #     bev_groups_count=bev_groups_count
-    # )
-
-    lr_scheduler = build_groupwise_lambda_scheduler(
-        optimizer,
-        lambda_unet=lambda_unet,
-        lambda_bev=lambda_bev,
-        bev_groups_count=bev_groups_count,
-        fuser_groups_count=fuser_groups_count
+    lr_scheduler = get_scheduler(
+        args.lr_scheduler,
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
+        num_training_steps=args.max_train_steps * accelerator.num_processes,
     )
-
     
     with accelerator.main_process_first():
         train_dataset = build_dataset(bev_cfg.data.train, 
-                                    default_args={
-                                        'pc_range': bev_cfg.point_cloud_range,
-                                        'use_3d_bbox': bev_cfg.use_3d_bbox,
-                                        'num_classes': bev_cfg.num_classes,
-                                        'num_bboxes': bev_cfg.num_bboxes,
-                                    })
+                                      default_args={
+                                          'pc_range': bev_cfg.point_cloud_range,
+                                          'use_3d_bbox': bev_cfg.use_3d_bbox,
+                                          'num_classes': bev_cfg.num_classes,
+                                          'num_bboxes': bev_cfg.num_bboxes,
+                                      })
         
         bev_cfg.data.test.load_annos = True
         val_dataset = build_dataset(bev_cfg.data.test,
@@ -273,16 +218,14 @@ def train():
                                         'num_bboxes': bev_cfg.num_bboxes,
                                     })
         
-
+      
     # DataLoaders creation:
     train_dataloader = build_dataloader(
         train_dataset,
         samples_per_gpu=args.train_batch_size, 
         workers_per_gpu=args.dataloader_num_workers,
-        # num_gpus=get_dist_info()[1],
-        # dist=(args.launcher != 'none'),
-        num_gpus=1,
-        dist=False,
+        num_gpus=get_dist_info()[1],
+        dist=(args.launcher != 'none'),
         seed=args.seed,
         shuffler_sampler=bev_cfg.data.shuffler_sampler,
         nonshuffler_sampler=bev_cfg.data.nonshuffler_sampler,
@@ -292,76 +235,57 @@ def train():
         val_dataset,
         samples_per_gpu=bev_cfg.data.samples_per_gpu,
         workers_per_gpu=bev_cfg.data.workers_per_gpu,
-        # dist=(args.launcher != 'none'),
-        dist=False,
+        dist=(args.launcher != 'none'),
         shuffle=False,
         nonshuffler_sampler=bev_cfg.data.nonshuffler_sampler,
     )
     
-    def dc_to_tensor(x):
-        return x.data[0] if isinstance(x, DataContainer) else x
-
     def get_condition(batch):
         cond = {}
-
+        
         if 'layout_obj_classes' in batch:
-            cond['obj_class'] = torch.stack(dc_to_tensor(batch['layout_obj_classes'])).to(accelerator.device, dtype=torch.long)
+            cond['obj_class'] = torch.stack(batch['layout_obj_classes'].data[0])
         if 'layout_obj_bboxes' in batch:
-            cond['obj_bbox'] = torch.stack(dc_to_tensor(batch['layout_obj_bboxes'])).to(accelerator.device, dtype=torch.float32)
+            cond['obj_bbox'] = torch.stack(batch['layout_obj_bboxes'].data[0])
         if 'layout_obj_is_valid' in batch:
-            cond['is_valid_obj'] = torch.stack(dc_to_tensor(batch['layout_obj_is_valid'])).to(accelerator.device, dtype=torch.float32)
+            cond['is_valid_obj'] = torch.stack(batch['layout_obj_is_valid'].data[0]) 
         if 'layout_obj_names' in batch:
-            cond['obj_name'] = torch.stack(dc_to_tensor(batch['layout_obj_names'])).to(accelerator.device, dtype=torch.long)
-
-        u = accelerator.unwrap_model(unet)
-        if np.random.rand() < args.uncond_prob and isinstance(u, LayoutDiffusionUNetModel):
-            enc = u.layout_encoder
-            dev = accelerator.device
-
-            if 'obj_class' in enc.used_condition_types and 'obj_class' in cond:
-                unk, special = enc.num_classes_for_layout_object - 1, enc.num_classes_for_layout_object - 2
-                new_cls = torch.full_like(cond['obj_class'], fill_value=unk)
-                new_cls[:, 0] = special
-                cond['obj_class'] = new_cls
-
-            if 'obj_name' in enc.used_condition_types and 'obj_name' in cond and 'default_obj_names' in batch:
-                defn = batch['default_obj_names'].data[0] if isinstance(batch['default_obj_names'], DataContainer) else batch['default_obj_names']
-                cond['obj_name'] = torch.stack(defn).to(dev, dtype=torch.long)
-
-            if 'obj_bbox' in enc.used_condition_types and 'obj_bbox' in cond:
-                tpl = torch.tensor([0,0,0,1,1,1,0,0,0], device=dev, dtype=cond['obj_bbox'].dtype) if enc.use_3d_bbox \
-                    else torch.tensor([0,0,1,1], device=dev, dtype=cond['obj_bbox'].dtype)
-                new_bbox = torch.zeros_like(cond['obj_bbox'])
-                new_bbox[:, 0] = tpl
-                cond['obj_bbox'] = new_bbox
-
-            if 'is_valid_obj' in cond:
-                iv = torch.zeros_like(cond['is_valid_obj'])
-                iv[:, 0] = 1.0
-                cond['is_valid_obj'] = iv
-
+            cond['obj_name'] = torch.stack(batch['layout_obj_names'].data[0])
+        
+        if np.random.rand() < args.uncond_prob:
+            if isinstance(unet.module, LayoutDiffusionUNetModel):
+                if 'obj_class' in unet.module.layout_encoder.used_condition_types:
+                    cond['obj_class'] = torch.ones_like(cond['obj_class']).fill_(unet.module.layout_encoder.num_classes_for_layout_object - 1)
+                    cond['obj_class'][:, 0] = unet.module.layout_encoder.num_classes_for_layout_object - 2
+                if 'obj_name' in unet.module.layout_encoder.used_condition_types:
+                    cond['obj_name'] = torch.stack(batch['default_obj_names'].data[0])
+                if 'obj_bbox' in unet.module.layout_encoder.used_condition_types:
+                    cond['obj_bbox'] = torch.zeros_like(cond['obj_bbox'])
+                    if unet.module.layout_encoder.use_3d_bbox:
+                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 0, 1, 1, 1, 0, 0, 0])
+                    else:
+                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 1, 1])
+                cond['is_valid_obj'] = torch.zeros_like(cond['is_valid_obj'])
+                cond['is_valid_obj'][:, 0] = 1.0  
+                 
         return cond
 
 
-    # unet, optimizer, lr_scheduler = accelerator.prepare(
-    #     unet, optimizer, lr_scheduler
-    # )
-
-    unet, bev_model, fuser, optimizer, lr_scheduler, train_dataloader, val_dataloader = accelerator.prepare(
-        unet, bev_model, fuser, optimizer, lr_scheduler, train_dataloader, val_dataloader
+    
+    unet, optimizer, lr_scheduler = accelerator.prepare(
+        unet, optimizer, lr_scheduler
     )
 
-    weight_dtype = torch.float32    
-    
+
+    weight_dtype = torch.float32
+
     # Move text_encode and vae to gpu and cast to weight_dtype
-    # bev_model.to(accelerator.device, dtype=weight_dtype)
+    bev_model.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-    
-    tb_writer = None
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
@@ -382,9 +306,11 @@ def train():
                     "name" : args.tracker_run_name
                 }
             }
+
         accelerator.init_trackers(project_name=args.tracker_project_name, 
-                                config=tracker_config,
-                                init_kwargs=init_kwargs)
+                                  config=tracker_config,
+                                  init_kwargs=init_kwargs)
+        tb_writer = None
         if args.report_to == "tensorboard":
             tb_logdir = os.path.join(args.output_dir, "tensorboard_logs")
             tb_writer = SummaryWriter(log_dir=tb_logdir)
@@ -428,10 +354,7 @@ def train():
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
-        bev_model.train()
         unet.train()
-        fuser.train()
-        
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             # For Resume from checkpoint, Skip steps until we reach the resumed step
@@ -440,18 +363,13 @@ def train():
                     logger.info(f"skipping data {step} / {resume_step}")
                 continue
 
-            # batch = unwrap_mmdet_batch(batch, accelerator.device)
             with accelerator.accumulate(unet):
-                # Get BEV 1) Original BEV feature for training
-                bev_embed = bev_model(return_loss=True, only_bev=True, **batch)
-                bev_embed = bev_embed.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)  # B, H, W, C
-                bev_embed = bev_embed.permute(0, 3, 1, 2).contiguous()   # B, C, H, W
-                
-                B, C, H, W = bev_embed.shape
+                # Get BEV
+                with torch.no_grad():
+                    latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
+                latents = latents.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)
+                latents = latents.permute(0, 3, 1, 2).contiguous()
 
-                # Get BEV 2) Original BEV feature for denoising
-                latents = bev_embed.clone().detach()
-                
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
                 
@@ -464,6 +382,7 @@ def train():
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 
                 # Get the target for loss depending on the prediction type
+
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 elif noise_scheduler.config.prediction_type == "sample":
@@ -473,22 +392,27 @@ def train():
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 
-                cond = get_condition(batch)
+                # cond = get_condition(batch)
+                img = batch['img'].data[0]
+                len_queue = img.size(1)
+                img = img[:, -1, ...]
+                img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
+                cond = get_dino(img, img_metas)
 
-                # Predict the denoised feature and diffusion loss
-                model_pred = unet(noisy_latents, timesteps, **cond)[0]  # B, C, H, W
+                # Predict the noise residual and compute loss
+                model_pred = unet(noisy_latents, timesteps, **cond)[0]
+
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
-                # Feature refinement    
-                fused_bev = fuser(bev_embed, model_pred.detach())  
-
-                task_loss = get_task_loss(fused_bev, **batch)
-                
+                if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
+                    task_loss = get_task_loss(model_pred, **batch)
+                else:
+                    task_loss = 0
+                    
                 total_loss = denoise_loss + args.task_loss_scale * task_loss
 
                 # get learing rate
                 lr = lr_scheduler.get_last_lr()[0]
-                lr_bev = lr_scheduler.get_last_lr()[1]
 
                 step_cnt += 1
 
@@ -496,10 +420,9 @@ def train():
                     "step/step_cnt" : step_cnt,
                     "step/epoch": epoch,
                     "lr/learning_rate" : lr,
-                    "lr/learning_rate_bev" : lr_bev,
                     "train/denoise_loss": denoise_loss,
                     "train/task_loss": task_loss,
-                    "train/total_loss": total_loss
+                    "train/total_loss": total_loss,
                 }
 
                 if accelerator.is_main_process:
@@ -512,24 +435,18 @@ def train():
                 loss = total_loss 
 
                 # Gather the losses across all processes for logging (if we use distributed training).
-                # avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-                avg_loss = accelerator.gather(total_loss.detach()).mean()
+                avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
                                 
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
                 # Backpropagate
-                with torch.autograd.set_detect_anomaly(True):
-                    accelerator.backward(loss)
-
+                accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-                    accelerator.clip_grad_norm_(bev_model.parameters(), 35.0)
-                    accelerator.clip_grad_norm_(fuser.parameters(), args.max_grad_norm)
-
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-                
+
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -563,25 +480,17 @@ def train():
                                     shutil.rmtree(removing_checkpoint)
 
                         accelerator.save_state(save_path)
-                        # save_checkpoint(bev_model, filename=os.path.join(save_path, "bev_model.pth"))
-                        save_checkpoint(accelerator.unwrap_model(bev_model), filename=os.path.join(save_path, "bev_model.pth"))
-                        # save_checkpoint(fuser, filename=os.path.join(save_path, "fuser.pth"))
-                        save_checkpoint(accelerator.unwrap_model(fuser), filename=os.path.join(save_path, "fuser.pth"))
+                        save_checkpoint(bev_model, filename=os.path.join(save_path, "bev_model.pth"))
                         logger.info(f"Saved state to {save_path}")
                         
-                    bev_model.eval()   
                     unet.eval()
-                    fuser.eval()
                     if global_step % 10000 == 0:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')
-                            unet_eval = accelerator.unwrap_model(unet)
-                            fuser_eval  = accelerator.unwrap_model(fuser)
-                            bev_eval  = accelerator.unwrap_model(bev_model)
-                            eval_results = evaluate(unet=unet_eval,
-                                                    bev_model=bev_eval,
-                                                    fuser=fuser_eval,
+                            eval_results = evaluate(unet=unet.module,
+                                                    bev_model=bev_model,
+                                                    get_dino=get_dino,
                                                     noise_scheduler=DDIM_scheduler,
                                                     dataset=val_dataset,
                                                     dataloader=val_dataloader,
@@ -601,11 +510,9 @@ def train():
                             for metric, score in eval_results.items():
                                 metric = f"val/{metric}"
                                 tb_writer.add_scalar(f"val/{metric}", score, global_step=step_cnt)
-                    bev_model.train()
-                    unet.train()
-                    fuser.train()                         
+                    unet.train()                         
 
-            logs = {"step_loss": loss.detach().item(), "lr_bev": lr_scheduler.get_last_lr()[1], "epoch":epoch}
+            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "epoch":epoch}
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
@@ -616,8 +523,9 @@ def train():
 
     accelerator.end_training()
     if tb_writer is not None:
-        tb_writer.close()
-
+        tb_writer.close()   
+    
+    
 def parse_args():
      # put all arg parse here
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -782,7 +690,7 @@ def parse_args():
     parser.add_argument(
         "--prediction_type",
         type=str,
-        default=None,
+        default="sample",
         help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'sample' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediction_type` is chosen.",
     )
 
@@ -848,13 +756,6 @@ def parse_args():
         type=float, 
         default=0.0
     )
-    
-    parser.add_argument(
-        "--bev_learning_rate",
-        type=float,
-        default=2e-5,  
-        help="Learning rate for fine-tuning the BEV model separately from the diffusion model."
-    )
 
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
@@ -870,3 +771,8 @@ def parse_args():
 
 if __name__ == "__main__":
     train()
+
+
+
+
+

@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmdet3d.models.builder import MODELS  
+from mmdet3d.models.builder import FUSERS
 from mmcv.utils import Registry
+# from mmdet3d.models import FUSERS
 
-
-
+@FUSERS.register_module()
 class CrossAttentionFusion(nn.Module):
     def __init__(self, d_model, d_k=None, d_v=None):
         super().__init__()
@@ -60,6 +60,7 @@ class CrossAttentionFusion(nn.Module):
         return out
 
 
+@FUSERS.register_module()
 class ConcatFusion_mlp(nn.Module):
     def __init__(self, in_channels=256, hidden_dim=256, out_channels=128):
         """
@@ -108,7 +109,7 @@ class ConcatFusion_mlp(nn.Module):
         return x
     
 
-# @FUSERS.register_module() 
+@FUSERS.register_module()
 class ConcatFusion(nn.Module):
     def __init__(self, in_channels=256, hidden_dim=256, out_channels=256, norm='group'):
         """

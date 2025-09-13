@@ -114,6 +114,13 @@ def parse_args():
         ))
     parser.add_argument('--stage', choices=['pretrain','finetune'], default='pretrain')
     parser.add_argument("--denoise_loss_weight", type=float, default=1.0)
+    parser.add_argument('--bev_checkpoint', 
+                    default="",
+                    help='checkpoint file')
+    parser.add_argument('--unet_checkpoint', 
+                default="",
+                help='checkpoint file')
+
 
 
     args = parser.parse_args()
@@ -276,7 +283,40 @@ def main():
         test_cfg=cfg.get('test_cfg'))
     model.init_weights()
     logger.info(f'Model:\n{model}')
+    
+    if args.bev_checkpoint is not None and (os.path.isfile(args.bev_checkpoint)):
+        ckpt_path = args.bev_checkpoint
+        raw = torch.load(ckpt_path, map_location='cpu')
+        state = raw.get('state_dict', raw)
 
+        def strip_prefix_if_present(k, prefix='module.'):
+            return k[len(prefix):] if k.startswith(prefix) else k
+        state = {strip_prefix_if_present(k): v for k, v in state.items()}
+
+        src_prefix = 'pts_bbox_head.transformer.'
+        cand = {k[len(src_prefix):]: v for k, v in state.items() if k.startswith(src_prefix)}
+        dst_sd = model.pts_bbox_head.transformer.state_dict()
+        sub_state = {}
+        skipped_shape = []
+        skipped_missing = []
+        
+        for k, v in cand.items():
+            if k in dst_sd:
+                if dst_sd[k].shape == v.shape:
+                    sub_state[k] = v
+                else:
+                    skipped_shape.append((k, tuple(v.shape), tuple(dst_sd[k].shape)))
+            else:
+                skipped_missing.append(k)
+
+        missing, unexpected = model.pts_bbox_head.transformer.load_state_dict(sub_state, strict=False)
+        logger.info(f'[Transformer partial load] loaded={len(sub_state)} '
+                f'missing_after_load={len(missing)} unexpected={len(unexpected)} '
+                f'skipped_shape={len(skipped_shape)} skipped_missing={len(skipped_missing)}')
+        
+    if args.unet_checkpoint is not None:
+        cfg.model.pts_bbox_head.unet.pretrained_checkpoint = args.unet_checkpoint
+        
     dataset_default_args = {
         'pc_range': cfg.point_cloud_range,
         'use_3d_bbox': cfg.use_3d_bbox,

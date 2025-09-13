@@ -20,6 +20,7 @@ from mmdet3d.core.bbox.coders import build_bbox_coder
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from mmcv.runner import force_fp32, auto_fp16
 
+
 @HEADS.register_module()
 class BEVFormerHead(DETRHead):
     """Head of Detr3D.
