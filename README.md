@@ -13,6 +13,8 @@
 
 Official implementation of BEVDiffuser. 
 
+Original BEVDiffuser with DINO features
+
 ## BEVDiffuser with BEVFormer
 - [Installation](BEVFormer/docs/install.md)
 - [Prepare Dataset](BEVFormer/docs/prepare_dataset.md)
