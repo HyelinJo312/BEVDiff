@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+# export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 GPUS=$1
 PORT=${PORT:-29503}
@@ -12,14 +12,14 @@ PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_BEVFormer_tiny_dino
+RUN_NAME=BEVDiffuser_BEVFormer_tiny_dino_v2
 
 # checkpoint settings
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=20
 
 # allow 500 extra steps to be safe
-MAX_TRAINING_STEPS=50000
+MAX_TRAINING_STEPS=70000
 TRAIN_BATCH_SIZE=1
 DATALOADER_NUM_WORKERS=4
 GRADIENT_ACCUMMULATION_STEPS=1
@@ -32,7 +32,7 @@ UNCOND_PROB=0.2
 PREDICTION_TYPE="sample" # "sample", "epsilon" or "v_prediction"
 TASK_LOSS_SCALE=0.1 # 0.1
 
-OUTPUT_DIR="../../train/${RUN_NAME}"
+OUTPUT_DIR="../../../results/pretrain_stage1/${RUN_NAME}"
 
 mkdir -p $OUTPUT_DIR
 

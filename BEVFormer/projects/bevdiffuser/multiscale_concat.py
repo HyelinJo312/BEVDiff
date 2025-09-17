@@ -29,8 +29,7 @@ class MultiScaleConcat(nn.Module):
             nn.GroupNorm(16, c2),
             nn.ReLU(),   # nn.ReLU(inplace=True)
         )
-
-        # concat 후 채널 압축
+        
         self.out_layer = nn.Sequential(
             nn.Conv2d(c0 + c1 + c2, out_dim, kernel_size=1, bias=False),
             nn.GroupNorm(16, out_dim),

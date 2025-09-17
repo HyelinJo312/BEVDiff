@@ -39,9 +39,9 @@ from datasets import load_dataset
 from packaging import version
 from torchvision import transforms
 from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers import AutoencoderKL, DDPMScheduler, DDIMScheduler, UNet2DConditionModel
+from diffusers import DDPMScheduler
 from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel
+# from diffusers.training_utils import EMAModel
 
 from mmcv import Config, DictAction
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
@@ -54,7 +54,7 @@ from mmdet.apis import set_random_seed
 
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
 from scheduler_utils import DDIMGuidedScheduler
-from model_utils import get_bev_model, build_unet, get_trained_bev_model
+from model_utils import get_bev_model, build_unet
 from test_bev_diffuser import evaluate
 from torch.utils.tensorboard import SummaryWriter
 
@@ -124,7 +124,7 @@ def train():
         noise_scheduler.register_to_config(prediction_type=args.prediction_type)
         DDIM_scheduler.register_to_config(prediction_type=args.prediction_type)
         
-    bev_model = get_trained_bev_model(args)
+    bev_model = get_bev_model(args)
 
     # Freeze vae and text_encoder
     bev_model.requires_grad_(False)

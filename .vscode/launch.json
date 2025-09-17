@@ -14,11 +14,12 @@
             "console": "integratedTerminal",
             "args": [
         
-                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_dino.py",
+                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_dino.py", 
+                // "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny.py",
                 "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--pretrained_unet_checkpoint", "None",
                 "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-2-1",
-                "--train_batch_size", "1",
+                "--train_batch_size", "2",
                 "--dataloader_num_workers", "4",
                 "--gradient_accumulation_steps", "1",
                 "--max_train_steps", "10",

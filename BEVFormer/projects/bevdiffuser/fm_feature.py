@@ -89,7 +89,7 @@ class GetDINOv2Cond(nn.Module):
 
         for p in self.model.parameters():
             p.requires_grad_(False)
-        self.model.eval()
+        # self.model.eval()
 
         self.hidden_dim = self.model.config.hidden_size  # 384/768/1024
 
@@ -162,7 +162,6 @@ class GetDINOv2Cond(nn.Module):
     #     return x
     
 
-    @torch.no_grad()
     def forward(self, images, img_metas, n_layers=4):
         """
         images: (B, 6, C, H, W) or (6, C, H, W) when bs=1
@@ -183,7 +182,7 @@ class GetDINOv2Cond(nn.Module):
         # x = self._preprocess(x)
         x, Hp, Wp, extra_geom = self.image_preprocess(x)
 
-        # Dinov2 forward: pass as pixel_values
+        # Dinov2 forward
         with torch.no_grad():
             outputs = self.model(pixel_values=x, output_hidden_states=True)
         hidden_states = outputs.hidden_states

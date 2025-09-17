@@ -218,8 +218,8 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-data_root = '../../data/nuscenes/'
-# data_root = 'BEVFormer/data/nuscenes/'
+# data_root = '../../data/nuscenes/'
+data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 train_pipeline = [

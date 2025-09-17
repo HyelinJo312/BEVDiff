@@ -52,7 +52,8 @@ num_classes = len(class_names) + 2
 use_3d_bbox = True
 
 unet = dict(
-    type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
+    # type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
+    type='projects.bevdiffuser.layout_diffusion.diffusion_unet.UNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -60,7 +61,7 @@ unet = dict(
         in_channels=_dim_,
         out_channels=_dim_,
         model_channels=256,
-        context_dim=256,
+        context_dim=768,
         # encoder_channels=256, # assert same as layout_encoder.hidden_dim
         num_head_channels=32,
         num_heads=-1,
@@ -203,8 +204,8 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-data_root = '../../data/nuscenes/'
-# data_root = 'BEVFormer/data/nuscenes/'
+# data_root = '../../data/nuscenes/'
+data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 

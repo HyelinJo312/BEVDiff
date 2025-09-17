@@ -287,6 +287,8 @@ def train():
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
+    tb_writer = None
+    
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:   
@@ -310,7 +312,7 @@ def train():
         accelerator.init_trackers(project_name=args.tracker_project_name, 
                                   config=tracker_config,
                                   init_kwargs=init_kwargs)
-        tb_writer = None
+        
         if args.report_to == "tensorboard":
             tb_logdir = os.path.join(args.output_dir, "tensorboard_logs")
             tb_writer = SummaryWriter(log_dir=tb_logdir)
