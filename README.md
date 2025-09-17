@@ -3,6 +3,8 @@
 
 **CVPR 2025 Highlight**
 
+**Original BEVDiffuser with DINO features**
+
 <a href="https://arxiv.org/pdf/2502.19694"><img src='https://img.shields.io/badge/arXiv-BEVDiffuser-red' alt='Paper PDF'></a>
 <a href='https://xin-ye-1.github.io/BEVDiffuser/'><img src='https://img.shields.io/badge/Project_Page-BEVDiffuser-green' alt='Project Page'></a>
 
@@ -12,6 +14,7 @@
 
 
 Official implementation of BEVDiffuser. 
+
 
 ## BEVDiffuser with BEVFormer
 - [Installation](BEVFormer/docs/install.md)
