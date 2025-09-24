@@ -56,7 +56,7 @@ from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
-from test_bev_diffuser_dino import evaluate
+from test_bev_diffuser_dino_v2 import evaluate
 from torch.utils.tensorboard import SummaryWriter
 from projects.bevdiffuser.fm_feature import GetDINOv2Cond
 from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
@@ -156,7 +156,7 @@ def train():
     # Get DINOv2 feature extractor
     get_dino = GetDINOv2Cond()
     
-    multi_scale_concat = MultiScaleConcat(in_chs=(256,512,1024), out_dim=256, mid=256, use_concat=True)
+    # multi_scale_concat = MultiScaleConcat(in_chs=(256,512,1024), out_dim=256, mid=256, use_concat=True)
 
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
 
@@ -275,8 +275,8 @@ def train():
 
 
     
-    unet, multi_scale_concat, optimizer, lr_scheduler = accelerator.prepare(
-        unet, multi_scale_concat, optimizer, lr_scheduler
+    unet, optimizer, lr_scheduler = accelerator.prepare(
+        unet, optimizer, lr_scheduler
     )
 
 
@@ -406,17 +406,16 @@ def train():
                 
                 # Predict the noise residual and compute loss
                 # model_pred = unet(noisy_latents, timesteps, **cond)[0]
-                multi_feats = unet(noisy_latents, timesteps, **cond)
+                model_pred, multi_feat = unet(noisy_latents, timesteps, **cond)
                 
                 # Concat multi-scale features
-                denoise_feat = multi_scale_concat(multi_feats)
-                
-                model_pred = multi_feats[0]
+                # denoise_feat = multi_scale_concat(multi_feats)
+                # model_pred = multi_feats[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
                 if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
-                    task_loss = get_task_loss(denoise_feat, **batch)
+                    task_loss = get_task_loss(multi_feat, **batch)
                 else:
                     task_loss = 0
                     

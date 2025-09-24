@@ -406,72 +406,63 @@ class QKVAttention(nn.Module):
 
 
 
-# class DINOContextAdapter(nn.Module):
+# class ContextAdapter(nn.Module):
 #     """
-#     Adapt DINOv2 global context (CLS tokens) to UNet time-embedding size.
-
+#     Adapt DINOv2/CLIP global context (CLS tokens) to UNet time-embedding size.
 #     Input:
-#       - context: (B, V, C_in) 
+#       - context: (B, V, C_in) or (B, C_in)
 #     Output:
 #       - context_proj: (B, C_emb)
-
 #     Args:
-#       c_in:   DINO hidden size (e.g., 768 for vitb14)
-#       c_emb:  UNet time-embedding size 
-#       pool:   'mean' | 'max' | 'attn'  (how to pool across views)
-#       dropout: dropout in the MLP head
-#       ln_first / ln_after: LayerNorm before/after projection
+#       c_in:   hidden size of input context (e.g., 768 or 1024)
+#       c_emb:  UNet time-embedding size to project into
+#       pool:   'mean' | 'max'  (how to pool across views)
+#       dropout: dropout probability inside the projection MLP
 #     """
-#     def __init__(self, c_in: int, c_emb: int,
-#                  pool: str = 'mean',
-#                  dropout: float = 0.0,
-#                  ln_first: bool = True,
-#                  ln_after: bool = True):
+#     def __init__(self, c_in: int, c_emb: int, pool: str = 'mean', dropout: float = 0.0):
 #         super().__init__()
-#         assert pool in ['mean', 'max']
+#         assert pool in ['mean', 'max'], f"Unsupported pool: {pool}"
 #         self.pool = pool
 
-#         self.ln_first = nn.LayerNorm(c_in) if ln_first else None
+#         self.norm_in = nn.LayerNorm(c_in)
 
-#         # lightweight projection head to emb dim
 #         self.proj = nn.Sequential(
-#             nn.Linear(c_in, c_emb),
+#             nn.Linear(c_in, c_emb, bias=True),
 #             nn.GELU(),
-#             nn.Linear(c_emb, c_emb),
+#             nn.Dropout(dropout),
+#             nn.Linear(c_emb, c_emb, bias=True),
 #         )
-#         self.ln_after = nn.LayerNorm(c_emb) if ln_after else None
 
-#     def forward(self, context, mask=None):
+#         self.norm_out = nn.LayerNorm(c_emb)
+
+#     def forward(self, context):
 #         """
 #         context: (B, V, C_in) or (B, C_in)
-#         mask:    optional (B, V) boolean; False = ignore that view
 #         returns: (B, C_emb)
 #         """
 #         if context.ndim == 2:
-#             # (B, C_in) -> add V=1
-#             context = context.unsqueeze(1)  # (B, 1, C_in)
+#             # (B, C_in) -> (B, 1, C_in)
+#             context = context.unsqueeze(1)
 #         elif context.ndim != 3:
-#             raise ValueError(f"context must be (B,C) or (B,V,C), got {context.shape}")
+#             raise ValueError(f"context must be (B,C) or (B,V,C), got {tuple(context.shape)}")
 
-#         B, V, C = context.shape
+#         # Pre-norm on channels
+#         x = self.norm_in(context)  # (B, V, C_in)
 
-#         x = context     # (B, V, C_in)
-#         if self.ln_first is not None:
-#             x = self.ln_first(x)  # LN over C
-
+#         # Pool across views
 #         if self.pool == 'mean':
-#             g = x.mean(dim=1)     # (B, C)
+#             g = x.mean(dim=1)          # (B, C_in)
+#         else:  # 'max'
+#             g, _ = x.max(dim=1)        # (B, C_in)
 
-#         elif self.pool == 'max':
-#             g, _ = x.max(dim=1)   # (B, C)
-
-#         g = self.proj(g)          # (B, C_emb)
-#         if self.ln_after is not None:
-#             g = self.ln_after(g)
+#         # Projection + post-norm
+#         g = self.proj(g)               # (B, C_emb)
+#         g = self.norm_out(g)           # (B, C_emb)
 #         return g
+
     
     
-class DINOContextAdapter(nn.Module):
+class ContextAdapter(nn.Module):
     """
     Input : context (B, V, C_in) or (B, C_in)
     Output: (B, C_emb)    
@@ -527,12 +518,12 @@ class DINOContextAdapter(nn.Module):
         return out
     
 
-class DINOBevAligner(nn.Module):
+class BEVAligner(nn.Module):
     """
-    Self-contained BEV aligner for DINOv2 last_tokens using BEVFormer-style reference generation.
+    Self-contained BEV aligner for DINOv2/CLIP last_tokens using BEVFormer-style reference generation.
 
     Inputs:
-      - last_tokens: (B, V, N, C_dino)
+      - last_tokens: (B, V, N, C_feat)
       - patch_hw:    (Hp, Wp) with Hp*Wp == N
       - img_metas:   list of dicts (len=B), each with:
           * 'lidar2img': (V, 4, 4)
@@ -549,7 +540,7 @@ class DINOBevAligner(nn.Module):
         pc_range = (-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
         num_points_in_pillar=4,
         input_size=518,             # DINO square resize S
-        c_dino=768,               # DINO feature dim
+        c_feat=768,               # DINO feature dim
         c_ctx=None,                  # output channels
         post_norm=True,
         post_ln_affine=True,       # recommended True (stability + capacity)
@@ -562,27 +553,32 @@ class DINOBevAligner(nn.Module):
         self.pc_range = pc_range
         self.num_points_in_pillar = num_points_in_pillar
         self.S = input_size
-        self.c_dino = c_dino
-        self.c_ctx = c_dino if c_ctx is None else c_ctx
+        self.c_feat = c_feat
+        self.c_ctx = c_feat if c_ctx is None else c_ctx
         self.eps = eps
 
         # Norms are created lazily with correct feature dim
         self.post_ln_affine = post_ln_affine
         self.pre_ln  = None
-        self.post_ln = nn.LayerNorm(self.c_dino, elementwise_affine=self.post_ln_affine).to(device)
+        self.post_ln = nn.LayerNorm(self.c_feat, elementwise_affine=self.post_ln_affine).to(device)
 
         # Per-view weights (initialized lazily with V)
         self._w_view = nn.Parameter(th.zeros(1, cam_view, 1, device=device))
 
-        # (B,Q,C_dino) -> (B,Q,C_ctx)
+        # (B,Q,C_feat) -> (B,Q,C_ctx)
         hidden = max(self.c_ctx * 2, 512)
-        # self.proj = nn.Linear(self.c_dino, self.c_ctx, bias=True)
+        # self.proj = nn.Linear(self.c_feat, self.c_ctx, bias=True)
         self.proj = nn.Sequential(
-            nn.LayerNorm(self.c_dino, elementwise_affine=True),
-            nn.Linear(self.c_dino, hidden, bias=False),
+            nn.LayerNorm(self.c_feat, elementwise_affine=True),
+            nn.Linear(self.c_feat, hidden, bias=False),
             nn.GELU(),
             nn.Linear(hidden, self.c_ctx, bias=True),
         )
+        
+        # self.out_norm_dino = nn.GroupNorm(1, self.c_ctx, affine=True)
+        # self.out_norm_clip = nn.GroupNorm(1, self.c_ctx, affine=True)
+        self.out_norm = nn.GroupNorm(1, self.c_ctx, affine=True)
+        
     # ---------- BEVFormer-style reference generation ----------
     @staticmethod
     def _get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim='3d', bs=1, device='cuda', dtype=th.float32):
@@ -657,21 +653,21 @@ class DINOBevAligner(nn.Module):
             fmap = t.view(B, V, Hp, Wp, C).permute(0,1,4,2,3).contiguous()
         return fmap
 
-    def forward(self, last_tokens, patch_hw, img_metas, dino_geom):
+    def forward(self, **cond):
         """
-        last_tokens: (B,V,N,C_dino)
+        last_tokens: (B,V,N,C_feat)
         patch_hw:    (Hp,Wp)
         img_metas:   list length B (BEVFormer-like metas)
         returns:     (B, C_ctx, bev_h, bev_w)
         """
-        assert last_tokens.ndim == 4
-        B, V, N, C_dino = last_tokens.shape
-        Hp, Wp = patch_hw
-        assert Hp * Wp == N, f"patch_hw {patch_hw} mismatches N={N}"
-        device = last_tokens.device
+        assert cond['last_tokens'].ndim == 4
+        B, V, N, C_feat = cond['last_tokens'].shape
+        Hp, Wp = cond['patch_hw']
+        assert Hp * Wp == N, f"patch_hw {cond['patch_hw']} mismatches N={N}"
+        device = cond['last_tokens'].device
 
         # (1) DINO fmap
-        fmap = self._tokens_to_fmap(last_tokens, Hp, Wp)  # (B, V, C_dino, Hp, Wp)
+        fmap = self._tokens_to_fmap(cond['last_tokens'], Hp, Wp)  # (B, V, C_feat, Hp, Wp)
 
         # (2) BEV refs and camera projection
         Z_bins = int(round((self.pc_range[5] - self.pc_range[2]) ))  # same spirit as BEVFormer
@@ -679,40 +675,57 @@ class DINOBevAligner(nn.Module):
                                             num_points_in_pillar=self.num_points_in_pillar,
                                             dim='3d', bs=B, device=device, dtype=fmap.dtype)
         
-        uv, bev_mask = self.point_sampling(ref_3d, img_metas)  # (V, B, Q, D, 2), (V,B,Q,D)
+        uv, bev_mask = self.point_sampling(ref_3d, cond['img_metas'])  # (V, B, Q, D, 2), (V,B,Q,D)
 
         # (3) uv coords -> patch grid coords
         Q = self.bev_h * self.bev_w
-        scale = dino_geom['scale']
-        pad_top, pad_left = dino_geom['padding'][0], dino_geom['padding'][1]
-        H2, W2 = dino_geom['H2W2'][0], dino_geom['H2W2'][1]
-    
         u = uv[..., 0]  # (V,B,Q,D)
         v = uv[..., 1]  # (V,B,Q,D)
+        
+        if cond['feature_type'] == 'dinov2':
+            scale = cond['geom']['scale']
+            pad_top, pad_left = cond['geom']['padding'][0], cond['geom']['padding'][1]
+            H2, W2 = cond['geom']['H2W2'][0], cond['geom']['H2W2'][1]
 
-        # DINO input pixel coords
-        u_d = u * scale + pad_left   #(V,B,Q,D)
-        v_d = v * scale + pad_top
+            # DINO input pixel coords
+            u_d = u * scale + pad_left   #(V,B,Q,D)
+            v_d = v * scale + pad_top
 
-        valid_in = (u_d >= 0) & (u_d <= (W2 - 1)) & (v_d >= 0) & (v_d <= (H2 - 1))
-        mask_bv = bev_mask & valid_in  # (V,B,Q,D
+            valid_in = (u_d >= 0) & (u_d <= (W2 - 1)) & (v_d >= 0) & (v_d <= (H2 - 1))
+            gx = 2.0 * (u_d / (W2 - 1.0)) - 1.0  # (V,B,Q,D)
+            gy = 2.0 * (v_d / (H2 - 1.0)) - 1.0
+            grid = th.stack([gx, gy], dim=-1)  # (V,B,Q,D,2)
+            
+        elif cond['feature_type'] == 'clip':
+            S = int(cond['geom']['H2W2'][0]) 
+            H0 = [int(m['img_shape'][0][0]) for m in cond['img_metas']]  # list len B
+            W0 = [int(m['img_shape'][0][1]) for m in cond['img_metas']]
 
-        # normalization
-        gx = 2.0 * (u_d / (W2 - 1.0)) - 1.0  # (V,B,Q,D)
-        gy = 2.0 * (v_d / (H2 - 1.0)) - 1.0
-        grid = th.stack([gx, gy], dim=-1)  # (V,B,Q,D,2)
+            # build per-batch scale and broadcast to (V,B,Q,D)
+            sy = th.tensor([S / h for h in H0], device=device, dtype=fmap.dtype).view(1, B, 1, 1)
+            sx = th.tensor([S / w for w in W0], device=device, dtype=fmap.dtype).view(1, B, 1, 1)
 
+            u_in = u * sx  # (V,B,Q,D)
+            v_in = v * sy
+
+            valid_in = (u_in >= 0) & (u_in <= (S - 1)) & (v_in >= 0) & (v_in <= (S - 1))
+            gx = 2.0 * (u_in / (S - 1.0)) - 1.0
+            gy = 2.0 * (v_in / (S - 1.0)) - 1.0
+            grid = th.stack([gx, gy], dim=-1)  # (V,B,Q,D,2)
+        
+        mask_bv = bev_mask & valid_in  # (V,B,Q,D)
+        
         # (4) bilinear sampling
-        fmap_v = fmap.view(B*V, C_dino, Hp, Wp)
+        fmap_v = fmap.view(B*V, C_feat, Hp, Wp)
         grid_v = grid.permute(1,0,2,3,4).contiguous().view(B*V, Q*self.num_points_in_pillar, 1, 2)
         sampled = F.grid_sample(fmap_v, grid_v, mode='bilinear',
                                 padding_mode='zeros', align_corners=True)  # (B*V,C,Q*D,1)
-        sampled = sampled.squeeze(-1).permute(0,2,1).contiguous().view(B, V, Q, self.num_points_in_pillar, C_dino)
+        sampled = sampled.squeeze(-1).permute(0,2,1).contiguous().view(B, V, Q, self.num_points_in_pillar, C_feat)
 
         # (5) post-norm
-        t = sampled.view(-1, C_dino)
+        t = sampled.view(-1, C_feat)
         t = self.post_ln(t)
-        sampled = t.view(B, V, Q, self.num_points_in_pillar, C_dino)
+        sampled = t.view(B, V, Q, self.num_points_in_pillar, C_feat)
 
         # (6) pillar mean + view-weighted mean
         mask = mask_bv.to(device).permute(1,0,2,3).unsqueeze(-1).float()  # (B,V,Q,D,1)
@@ -727,51 +740,18 @@ class DINOBevAligner(nn.Module):
         view_valid = (denom_D.squeeze(3) > 0).float()                                     
         num = (feat_v * w).sum(dim=1)                                      # (B,Q,C)
         den = (w * view_valid).sum(dim=1).clamp_min(self.eps)              # (B,Q,1)
-        f_bev = num / den                                                  # (B,Q,C_dino)
+        f_bev = num / den                                                  # (B,Q,C_feat)
 
-        # (7) channel reduction (B,Q,C_dino) -> (B,Q,C_ctx)
+        # (7) channel reduction (B,Q,C_feat) -> (B,Q,C_ctx)
         bev_qc = self.proj(f_bev)                                       # (B,Q,C_ctx)
 
         # reshape to (B,C_ctx,H,W)
         bev_feat_ctx = bev_qc.permute(0,2,1).contiguous().view(B, self.c_ctx, self.bev_h, self.bev_w)
+        bev_feat_ctx = self.out_norm(bev_feat_ctx)
         return bev_feat_ctx
 
 
 
-class MultiScaleConcat(nn.Module):
-    def __init__(self, in_chs=(256,512,1024), out_dim=256, mid=256, use_concat=True):
-        super().__init__()
-        c0, c1, c2 = in_chs
-        C = mid  
-        
-        self.layer0 = nn.Sequential(nn.Conv2d(c0, C, 1, bias=False), 
-                                nn.GroupNorm(32, C), 
-                                nn.SiLU())
-        self.layer1 = nn.Sequential(nn.Conv2d(c1, C, 1, bias=False), 
-                                nn.GroupNorm(32, C), 
-                                nn.SiLU())
-        self.layer2 = nn.Sequential(nn.Conv2d(c2, C, 1, bias=False), 
-                                nn.GroupNorm(32, C), 
-                                nn.SiLU())
-
-        self.use_concat = use_concat
-        in_mix = C*3 if use_concat else C
-        self.mix = nn.Sequential(
-            nn.Conv2d(in_mix, out_dim, 3, padding=1, bias=False),
-            nn.GroupNorm(32, out_dim),
-            nn.SiLU()
-        )
-
-    def forward(self, xs):
-        x0, x1, x2 = xs
-        B, _, H, W = x0.shape
-
-        f0 = self.layer0(x0)                                   # [B,C,H,W]
-        f1 = F.interpolate(self.layer1(x1), (H, W), mode='bilinear', align_corners=False)
-        f2 = F.interpolate(self.layer2(x2), (H, W), mode='bilinear', align_corners=False)
-
-        fused = th.cat([f0, f1, f2], dim=1) if self.use_concat else (f0 + f1 + f2)/3.0
-        return self.mix(fused)                              # [B,out_dim,H,W]
 
 
 class UNetModel(nn.Module):
@@ -831,7 +811,7 @@ class UNetModel(nn.Module):
         use_spatial_transformer=False,    # custom transformer support
         transformer_depth=1,              # custom transformer support
         context_dim=768,                 # custom transformer support
-        dino_dim=768,
+        cond_dim=768,
         n_embed=None,                     # custom support for prediction of discrete ids into codebook of first stage vq model
         legacy=True,
     ):
@@ -882,15 +862,19 @@ class UNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
         
+        self.proj = nn.Linear(time_embed_dim * 2, time_embed_dim)
+        # th.nn.init.zeros_(self.proj.weight); th.nn.init.zeros_(self.proj.bias)
+        
         # DINO feature condition
-        self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, pool='mean')
-        # self.aligner = DINOBevAligner(c_dino=dino_dim, c_ctx=None)
-        self.aligner = DINOBevAlignerDeform(c_dino=dino_dim, c_ctx=dino_dim)
-        self.multi_concat = MultiScaleConcat(in_chs=(model_channels, model_channels*2, model_channels*4), 
-                                             out_dim=model_channels, 
-                                             mid=model_channels, 
-                                             use_concat=True)
-
+        # self.adapter = DINOContextAdapter(c_in=cond_dim, c_emb=time_embed_dim, pool='mean')
+        self.adapter = ContextAdapter(c_in=cond_dim, c_emb=time_embed_dim, pool='mean')
+        self.aligner = BEVAligner(c_feat=cond_dim, c_ctx=None)
+        # self.aligner = DINOBevAlignerDeform(c_dino=cond_dim, c_ctx=cond_dim)
+        self.bev_proj = nn.Sequential(
+                            nn.Conv2d(cond_dim*2, 1024, kernel_size=1, bias=False),
+                            nn.SiLU(),
+                            nn.Conv2d(1024, cond_dim, kernel_size=1, bias=True),
+                        )
 
         self.downsample_blocks = nn.ModuleList([])
         self.upsample_blocks = nn.ModuleList([])
@@ -1097,7 +1081,7 @@ class UNetModel(nn.Module):
         self.adapter.apply(convert_module_to_f16)
         self.aligner.apply(convert_module_to_f16)
 
-    def forward(self, x, timesteps=None, last_cls=None, last_tokens=None, img_metas=None, patch_hw=None, dino_geom=None, **kwargs):
+    def forward(self, x, timesteps, cond):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -1106,19 +1090,28 @@ class UNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        assert last_cls is not None and last_tokens is not None and patch_hw is not None and img_metas is not None
-
+        
         hs = []
+        
+        dino_cond = cond[0]
+        clip_cond = cond[1]
 
         t_emb = timestep_embedding(timesteps, self.model_channels)
         emb = self.time_embed(t_emb) # emb.shape = [B, 1024]
 
         # global condition
-        global_cond_proj = self.adapter(last_cls)
+        global_dino_proj = self.adapter(dino_cond['last_cls'])
+        global_clip_proj = self.adapter(clip_cond['last_cls'])
+        global_cond_proj = th.cat([global_dino_proj, global_clip_proj], dim=-1)
+        global_cond_proj = self.proj(global_cond_proj)
         emb = emb + global_cond_proj
 
         # local condition => last_tokens: (B,V,N,C_dino), patch_hw=(Hp,Wp)
-        bev_ctx = self.aligner(last_tokens, patch_hw=patch_hw, img_metas=img_metas, dino_geom=dino_geom)  # (B,768,50,50)
+        bev_ctx_dino = self.aligner(**dino_cond)  # (B,768,50,50)
+        bev_ctx_clip = self.aligner(**clip_cond)  # (B,768,50,50)
+        bev_ctx = th.cat([bev_ctx_dino, bev_ctx_clip], dim=1)  # (B,1536,50,50)
+        bev_ctx = self.bev_proj(bev_ctx)  # (B,768,50,50)
+        
         tokens_by_ds = {}
         for ds_key in self.attention_resolutions[::-1]:
             target_hw = int(self.image_size // ds_key)  # 50//1=50, 50//2=25, 50//4=12
@@ -1152,8 +1145,7 @@ class UNetModel(nn.Module):
 
         if self.return_multiscale:
             out_list.append(h)
-            multi_feat = self.multi_concat(out_list[::-1])  
-            return out_list[-1], multi_feat
+            return out_list[::-1]
         else:
             return h    
 

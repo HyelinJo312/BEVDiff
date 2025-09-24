@@ -11,10 +11,8 @@ from collections import OrderedDict
 # import lightning as L
 from typing import Optional
 import math
-# from utils import pad, unpad, silog
-# from optimizer import get_optimizer
-# from metrics import compute_metrics
-# from utils import eigen_crop, garg_crop, custom_crop, no_crop
+from transformers import AutoImageProcessor, Dinov2Model
+from transformers import CLIPProcessor, CLIPVisionModel
 
 NUM_DECONV = 3
 NUM_FILTERS = [32, 32, 32]
@@ -83,13 +81,12 @@ class GetDINOv2Cond(nn.Module):
         self.patch = patch
         self.symmetric_pad = symmetric_pad
 
-        from transformers import AutoImageProcessor, Dinov2Model
-
         self.model = Dinov2Model.from_pretrained("facebook/dinov2-base").to(self.device)
+        # self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
 
         for p in self.model.parameters():
             p.requires_grad_(False)
-        # self.model.eval()
+        self.model.eval()
 
         self.hidden_dim = self.model.config.hidden_size  # 384/768/1024
 
@@ -200,17 +197,141 @@ class GetDINOv2Cond(nn.Module):
         last_tok, last_cls = feats_out[-1][0], feats_out[-1][1]
 
         return {
+            'feature_type': 'dinov2',
             'features': feats_out,          # list[(B,V,N,C),(B,V,C)]
             'patch_hw': (Hp, Wp),
             'last_cls': last_cls,           # (B, V, C)
             'last_tokens': last_tok,        # (B, V, N, C)
             'img_metas': img_metas,
-            'dino_geom': extra_geom
+            'geom': extra_geom
         }
 
 
+class GetCLIPCond(nn.Module):
+    """
+    CLIP condition encoder (HF-only, Tensor-only).
 
+    Inputs:
+      - images: torch.Tensor of shape (B, C, H, W) or (B, V, C, H, W), RGB
+                values can be in [0,1] or [0,255]
 
+    Returns (preserves view dim if provided):
+      - 'features': list of tuples per selected layer:
+          [(tok_seq: (B,V,N,C), cls_tok: (B,V,C)), ...]
+      - 'patch_hw': (Hp, Wp)
+      - 'last_cls': (B, V, C)              # global token from last selected layer
+      - 'last_tokens': (B, V, N, C)        # patch tokens from last selected layer
+      - 'img_metas': passthrough
+      - 'clip_geom': dict with preprocess meta (scale, H2W2, padding)
+    """
+    def __init__(
+        self,
+        model_id = "openai/clip-vit-base-patch16",  # e.g., "openai/clip-vit-large-patch14-336"
+        device='cuda',
+        input_size=None,  # if None, use model's vision_config.image_size
+        symmetric_pad=True,
+    ):
+        super().__init__()
+        self.device = device
+        
+        self.model = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch16").to(device)
 
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        self.model.eval()
+        
+        vcfg = self.model.config
+        self.hidden_dim = vcfg.hidden_size
+        self.patch = vcfg.patch_size                   # CLIP ViT patch
+        self.base_image_size = vcfg.image_size         # model's nominal input size (e.g., 224)
+        self.input_min = input_size if None else self.base_image_size
+        self.symmetric_pad = symmetric_pad
 
+    # @torch.inference_mode()
+    def image_preprocess(self, x: torch.Tensor):
+        """
+        x: (N, 3, H, W) float tensor in [0,1] or [0,255]
+        -> (x_norm: (N, 3, H2, W2) on self.device, CLIP normalized,
+            Hp, Wp: patch grid size = (H2//patch, W2//patch))
+        """
+        assert x.ndim == 4 and x.shape[1] == 3, f"Expected (N,3,H,W), got {x.shape}"
+        x = x.to(dtype=torch.float32)
+        if x.max() > 1.5:  # likely [0,255]
+            x = x / 255.0
+        x = x.clamp_(0.0, 1.0)
 
+        N, C, H, W = x.shape
+        
+        # resize (bicubic)
+        x = F.interpolate(x, size=(self.input_min, self.input_min), mode='bicubic', align_corners=False)
+
+        x = x.to(self.device, non_blocking=True)
+        
+        H2 = W2 = self.input_min
+        Hp, Wp = H2 // self.patch, W2 // self.patch
+
+        extra_geom = {
+            'scale': None,
+            'H2W2': (H2, W2),
+            'padding': None,
+            'target_input_min': self.input_min,
+            'patch': self.patch,
+        }
+
+        Hp, Wp = H2 // self.patch, W2 // self.patch
+        return x, Hp, Wp, extra_geom
+
+    # @torch.inference_mode()
+    def forward(self, images: torch.Tensor, img_metas=None, n_layers: int = 4):
+        """
+        images: (B, V, C, H, W) or (V, C, H, W) (bs=1) or (B, C, H, W)
+        """
+        if not isinstance(images, torch.Tensor):
+            raise TypeError("images must be a torch.Tensor")
+
+        if images.ndim == 5:
+            B, V, C, H, W = images.shape
+            x = images.reshape(B * V, C, H, W).contiguous()
+        elif images.ndim == 4:
+            # (B, C, H, W) or (V, C, H, W) when bs=1
+            if images.shape[0] == 3 and images.shape[1] != 3:
+                # guard for ambiguous shapes
+                raise ValueError(f"Ambiguous shape {images.shape}; expected (B,3,H,W) or (V,3,H,W).")
+            if images.shape[1] == 3:  # (B,3,H,W)
+                B = images.shape[0]; V = 1
+            else:                     # (V,3,H,W) (assume bs=1)
+                B = 1; V = images.shape[0]
+            x = images.reshape(B * V, 3, images.shape[-2], images.shape[-1]).contiguous()
+        else:
+            raise ValueError(f"Unexpected tensor shape: {images.shape}")
+
+        # Preprocess
+        x, Hp, Wp, extra_geom = self.image_preprocess(x)
+
+        # CLIP vision forward 
+        outputs = self.model(pixel_values=x, output_hidden_states=True)
+        hidden_states = outputs.hidden_states  # list[ (B*V, 1+N, C) ]
+
+        hs_selected = hidden_states[-n_layers:] if n_layers > 0 else [hidden_states[-1]]
+
+        feats_out = []
+        for h in hs_selected:
+            # h: (B*V, 1+N, C)
+            cls_tok = h[:, 0]           # (B*V, C)
+            tok    = h[:, 1:]           # (B*V, N, C) with N = Hp*Wp
+
+            cls_tok = cls_tok.view(B, V, self.hidden_dim)          # (B,V,C)
+            tok_seq = tok.view(B, V, Hp * Wp, self.hidden_dim)     # (B,V,N,C)
+            feats_out.append((tok_seq, cls_tok))
+
+        last_tok, last_cls = feats_out[-1][0], feats_out[-1][1]
+
+        return {
+            'feature_type': 'clip',
+            'features': feats_out,          # list[(B,V,N,C),(B,V,C)]
+            'patch_hw': (Hp, Wp),
+            'last_cls': last_cls,           # (B, V, C)
+            'last_tokens': last_tok,        # (B, V, N, C)
+            'img_metas': img_metas,
+            'geom': extra_geom
+        }

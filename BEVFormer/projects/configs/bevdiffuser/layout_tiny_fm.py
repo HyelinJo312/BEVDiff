@@ -52,8 +52,7 @@ num_classes = len(class_names) + 2
 use_3d_bbox = True
 
 unet = dict(
-    # type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
-    type='projects.bevdiffuser.layout_diffusion.diffusion_unet.UNetModel',
+    type='projects.bevdiffuser.layout_diffusion.diffusion_fm_unet.UNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
