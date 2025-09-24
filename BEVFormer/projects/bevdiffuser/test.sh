@@ -1,12 +1,12 @@
 set -e
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=4
 
-BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
+BEV_CONFIG="../configs/bevdiffuser/layout_tiny_fm.py"
 
-CHECKPOINT_DIR="../../train/BEVDiffuser_BEVFormer_tiny_pretraining_cyclic_10denoise_1taskloss/checkpoint-50000"
+CHECKPOINT_DIR="../../../results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_fm_globalcond-mean-resume-30000/checkpoint-50000"
 
-BEV_CHECKPOINT="../../train/BEVDiffuser_BEVFormer_tiny_pretraining_cyclic_10denoise_1taskloss/checkpoint-50000/bev_model.pth"
+BEV_CHECKPOINT="../../../results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_fm_globalcond-mean-resume-30000/checkpoint-50000/bev_model.pth"
 # "../../ckpts/bevformer_tiny_epoch_24.pth" 
 
 PREDICTION_TYPE="sample"
@@ -19,7 +19,7 @@ export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
 
 
-python -m torch.distributed.launch --master_port 9999 test_bev_diffuser_v2.py \
+python -m torch.distributed.launch --master_port 9999 test_bev_diffuser_fm.py \
     --bev_config $BEV_CONFIG \
     --bev_checkpoint $BEV_CHECKPOINT \
     --checkpoint_dir $CHECKPOINT_DIR \

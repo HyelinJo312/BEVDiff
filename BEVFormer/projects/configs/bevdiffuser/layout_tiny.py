@@ -72,7 +72,7 @@ unet = dict(
         dropout=0.0,
         use_checkpoint=False,
         use_positional_embedding_for_attention=True,
-        return_multiscale=True,
+        return_multiscale=False,
         attention_block_type='ObjectAwareCrossAttention',
         layout_encoder=dict(
             type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
@@ -218,8 +218,8 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-# data_root = '../../data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+data_root = '../../data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 train_pipeline = [

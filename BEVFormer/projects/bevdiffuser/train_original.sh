@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 GPUS=$1
 PORT=${PORT:-29503}
@@ -19,9 +19,9 @@ CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=20
 
 # allow 500 extra steps to be safe
-MAX_TRAINING_STEPS=30000
+MAX_TRAINING_STEPS=50000
 TRAIN_BATCH_SIZE=2
-DATALOADER_NUM_WORKERS=2
+DATALOADER_NUM_WORKERS=4
 GRADIENT_ACCUMMULATION_STEPS=1
 
 # loss and lr settings
@@ -32,7 +32,7 @@ UNCOND_PROB=0.2
 PREDICTION_TYPE="sample" # "sample", "epsilon" or "v_prediction"
 TASK_LOSS_SCALE=0.1 # 0.1
 
-OUTPUT_DIR="../../train/${RUN_NAME}"
+OUTPUT_DIR="../../../results/${RUN_NAME}"
 
 mkdir -p $OUTPUT_DIR
 
@@ -43,7 +43,6 @@ export NCCL_P2P_DISABLE=1
 export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONWARNINGS="ignore"
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 
 # train!
 PYTHONPATH="$(dirname $0)/../..":$PYTHONPATH \

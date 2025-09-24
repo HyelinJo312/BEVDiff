@@ -56,10 +56,9 @@ from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
-from test_bev_diffuser_dino import evaluate
+from test_bev_diffuser_fm import evaluate
 from torch.utils.tensorboard import SummaryWriter
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
-from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
+from projects.bevdiffuser.fm_feature import GetDINOv2Cond, GetCLIPCond
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -153,11 +152,10 @@ def train():
         unet.downsample_blocks.requires_grad_(True)
         unet.upsample_blocks.requires_grad_(True)
         
-    # Get DINOv2 feature extractor
+    # Get FM feature extractors
     get_dino = GetDINOv2Cond()
+    get_clip = GetCLIPCond()
     
-    multi_scale_concat = MultiScaleConcat(in_chs=(256,512,1024), out_dim=256, mid=256, use_concat=True)
-
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
@@ -275,8 +273,8 @@ def train():
 
 
     
-    unet, multi_scale_concat, optimizer, lr_scheduler = accelerator.prepare(
-        unet, multi_scale_concat, optimizer, lr_scheduler
+    unet, optimizer, lr_scheduler = accelerator.prepare(
+        unet, optimizer, lr_scheduler
     )
 
 
@@ -342,7 +340,7 @@ def train():
     if args.resume_from_checkpoint:
         resume_path = args.resume_from_checkpoint
 
-        accelerator.logger.info(f"Resuming from checkpoint {resume_path}")
+        logger.info(f"Resuming from checkpoint {resume_path}")
         accelerator.load_state(resume_path)
         global_step = int(resume_path.split("-")[-1])
 
@@ -402,21 +400,18 @@ def train():
                 len_queue = img.size(1)
                 img = img[:, -1, ...]
                 img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
-                cond = get_dino(img, img_metas)
+                
+                dino_cond = get_dino(img, img_metas)
+                clip_cond = get_clip(img, img_metas)
+                cond = [dino_cond, clip_cond]
                 
                 # Predict the noise residual and compute loss
-                # model_pred = unet(noisy_latents, timesteps, **cond)[0]
-                multi_feats = unet(noisy_latents, timesteps, **cond)
-                
-                # Concat multi-scale features
-                denoise_feat = multi_scale_concat(multi_feats)
-                
-                model_pred = multi_feats[0]
+                model_pred = unet(noisy_latents, timesteps, cond)[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
                 if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
-                    task_loss = get_task_loss(denoise_feat, **batch)
+                    task_loss = get_task_loss(model_pred, **batch)
                 else:
                     task_loss = 0
                     
@@ -502,6 +497,7 @@ def train():
                             eval_results = evaluate(unet=unet.module,
                                                     bev_model=bev_model,
                                                     get_dino=get_dino,
+                                                    get_clip=get_clip,
                                                     noise_scheduler=DDIM_scheduler,
                                                     dataset=val_dataset,
                                                     dataloader=val_dataloader,
