@@ -9,12 +9,12 @@
             "request": "launch",
             //"module": "torch.distributed.launch",
             //"justMyCode": true,
-            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_fm.py",
+            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_dino_v2.py",
             // "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_original.py",
             "console": "integratedTerminal",
             "args": [
         
-                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_fm.py", 
+                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_dino.py", 
                 // "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny.py", 
                 "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--pretrained_unet_checkpoint", "None",
@@ -50,27 +50,61 @@
                 "TORCH_DISTRIBUTED_DEBUG ": "DETAIL"
 
             }
+        },
+                        
+        {
+            "name": "Test_bevdiffuser", 
+            "type": "debugpy",
+            "request": "launch",
+            //"module": "torch.distributed.launch",
+            //"justMyCode": true,
+            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/test_bev_diffuser_dino_v2_vis.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_dino.py", 
+                "--bev_checkpoint", "${workspaceFolder}/results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_dino_v2_new_global_adapter_constant-lr/checkpoint-60000/bev_model.pth",
+                "--checkpoint_dir", "${workspaceFolder}/results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_dino_v2_new_global_adapter_constant-lr/checkpoint-60000", 
+                "--prediction_type", "sample",
+                "--noise_timesteps", "0",
+                "--denoise_timesteps", "0", 
+                "--num_inference_steps", "0"
+                
+            ],
+
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "1",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+                "TORCH_DISTRIBUTED_DEBUG ": "DETAIL"
+
+            }
             
         },
 
+    
         {
-            "name": "Train_bevdiffuser_pretrain", 
+            "name": "Train_diff_bevformer", 
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/BEVFormer/tools/train_pretrain.py",
+            //"module": "torch.distributed.launch",
+            //"justMyCode": true,
+            "program": "${workspaceFolder}/BEVFormer/tools/train.py",
             "console": "integratedTerminal",
             "args": [
-                "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_pretrain_GTlayout.py", 
+                "${workspaceFolder}/BEVFormer/projects/configs/diff_bevformer/layout_tiny_dino.py",
                 // "--launcher", "None",
                 "--deterministic",
-                "--work_dir", "${workspaceFolder}/results_pretrain_debug_v2",
-                // "--load_from", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
-                // "--resume_from", "None",
-                "--report_to", "tensorboard",
-                "--denoise_loss_weight", "1.0",
-                "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
-                "--unet_checkpoint", "{workspaceFolder}/BEVFormer/ckpts"
-
+                "--work_dir", "${workspaceFolder}/results_debug",
+                "--tracker_project_name", "DiffBEVFormer_debug",
+                "--tracker_run_name", "BEVFormer_tiny_with_BEVDiffuser_debug", 
+                "--unet_checkpoint_dir", "${workspaceFolder}/results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_dino_v2_new_global_adapter_constant-lr/checkpoint-60000",
+                "--load_from", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
+                "--resume_from", "None",
+                "--report_to", "tensorboard"
             ],
 
             "env": {
@@ -84,7 +118,34 @@
 
 
             }
-        }
+            
+        },
+
+        {
+            "name": "Visualize", 
+            "type": "debugpy",
+            "request": "launch",
+            //"module": "torch.distributed.launch",
+            //"justMyCode": true,
+            "program": "${workspaceFolder}/BEVFormer/tools/analysis_tools/visual.py",
+            "console": "integratedTerminal",
+            "args": [
+                
+            ],
+
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "1",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+                "TORCH_DISTRIBUTED_DEBUG ": "DETAIL"
+
+            }
+            
+        },
             
     ]
 }

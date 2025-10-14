@@ -83,7 +83,7 @@ class GetDINOv2Cond(nn.Module):
 
         self.model = Dinov2Model.from_pretrained("facebook/dinov2-base").to(self.device)
         # self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-
+        self.model.requires_grad_(False)
         for p in self.model.parameters():
             p.requires_grad_(False)
         self.model.eval()
@@ -138,6 +138,7 @@ class GetDINOv2Cond(nn.Module):
         extra_geom['scale'] = scale
         extra_geom['H2W2'] = (H2, W2)
         extra_geom['padding'] = (top, left)
+        extra_geom['patch_size'] = self.patch
 
         Hp, Wp = H2 // self.patch, W2 // self.patch
         return x, Hp, Wp, extra_geom
@@ -186,15 +187,17 @@ class GetDINOv2Cond(nn.Module):
         hs_selected = hidden_states[-n_layers:] if n_layers > 0 else [hidden_states[-1]]
 
         feats_out = []
+        cls_out = []
         for h in hs_selected:
             cls_tok = h[:, 0]          # (B*V, C_dino)
             tok    = h[:, 1:]          # (B*V, Hp*Wp, C_dino)
             # tok = h[:, 1:, :] 
             cls_tok = cls_tok.view(B, V, self.hidden_dim)                  # (B,V,C)
             tok_seq = tok.view(B, V, Hp * Wp, self.hidden_dim)             # (B,V,N,C)
-            feats_out.append((tok_seq, cls_tok))
+            feats_out.append(tok_seq)
+            cls_out.append(cls_tok)
 
-        last_tok, last_cls = feats_out[-1][0], feats_out[-1][1]
+        last_tok, last_cls = feats_out[-1], cls_out[-1]
 
         return {
             'feature_type': 'dinov2',
@@ -235,7 +238,6 @@ class GetCLIPCond(nn.Module):
         self.device = device
         
         self.model = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch16").to(device)
-
         for p in self.model.parameters():
             p.requires_grad_(False)
         self.model.eval()

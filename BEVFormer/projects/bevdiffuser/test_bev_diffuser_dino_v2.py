@@ -196,7 +196,7 @@ def test():
     )
   
     save_path = os.path.join('../../test', args.bev_config.split('/')[-1].split('.')[-2], args.checkpoint_dir.split('/')[-2], args.checkpoint_dir.split('/')[-1])
-        
+
     evaluate(unet=unet,
              bev_model=bev_model,
              get_dino=get_dino,
@@ -225,7 +225,6 @@ def evaluate(unet,
              denoise_timesteps=0,
              num_inference_steps=0,
              use_classifier_guidence=False):
-    
     def get_classifier_gradient(x, **kwargs):
         x_ = x.detach().requires_grad_(True)
         x_ = x_.permute(0, 2, 3, 1)
@@ -235,37 +234,6 @@ def evaluate(unet,
         gradient = gradient.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)
         gradient = gradient.permute(0, 3, 1, 2)
         return gradient
-    
-    def get_condition(batch, use_cond=True):
-        cond = {}
-        if 'layout_obj_classes' in batch:
-            cond['obj_class'] = torch.stack(batch['layout_obj_classes'].data[0])
-        if 'layout_obj_bboxes' in batch:
-            cond['obj_bbox'] = torch.stack(batch['layout_obj_bboxes'].data[0])
-        if 'layout_obj_is_valid' in batch:
-            cond['is_valid_obj'] = torch.stack(batch['layout_obj_is_valid'].data[0]) 
-        if 'layout_obj_names' in batch:
-            cond['obj_name'] = torch.stack(batch['layout_obj_names'].data[0])
-        
-        if not use_cond:
-            if isinstance(unet, LayoutDiffusionUNetModel):
-                if 'obj_class' in unet.layout_encoder.used_condition_types:
-                    cond['obj_class'] = torch.ones_like(cond['obj_class']).fill_(unet.layout_encoder.num_classes_for_layout_object - 1)
-                    cond['obj_class'][:, 0] = unet.layout_encoder.num_classes_for_layout_object - 2
-                if 'obj_name' in unet.layout_encoder.used_condition_types:
-                    cond['obj_name'] = torch.stack(batch['default_obj_names'].data[0])
-                if 'obj_bbox' in unet.layout_encoder.used_condition_types:
-                    cond['obj_bbox'] = torch.zeros_like(cond['obj_bbox'])
-                    if unet.layout_encoder.use_3d_bbox:
-                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 0, 1, 1, 1, 0, 0, 0])
-                    else:
-                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 1, 1])
-                cond['is_valid_obj'] = torch.zeros_like(cond['is_valid_obj'])
-                cond['is_valid_obj'][:, 0] = 1.0 
-        for key, value in cond.items():
-            if isinstance(value, torch.Tensor):
-                cond[key] = value.to(latents.device)            
-        return cond
     
     det_res_path = f"{noise_timesteps}_{denoise_timesteps}_{num_inference_steps}"
     bbox_results = []
@@ -297,14 +265,13 @@ def evaluate(unet,
             uncond['last_tokens'] = last_tokens_u
             return uncond
         
-        
         if noise_timesteps > 0:
             if noise_timesteps > 1000:
                 latents = torch.randn_like(latents)
                 latents = latents * noise_scheduler.init_noise_sigma
             else:   
                 noise = torch.randn_like(latents)
-                noise_timesteps = torch.tensor(noise_timesteps).long()   
+                noise_timesteps = torch.as_tensor(noise_timesteps).long()   
                 latents = noise_scheduler.add_noise(latents, noise, noise_timesteps)
         
         if denoise_timesteps > 0:    
@@ -314,21 +281,28 @@ def evaluate(unet,
             # # DDIM
             noise_scheduler.config.num_train_timesteps=denoise_timesteps
             noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
-        
-            for _, t in enumerate(noise_scheduler.timesteps): # 이 부분은 구현 고민 좀 필요 
+            
+            for _, t in enumerate(noise_scheduler.timesteps): # always use multi-scale features
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                if t != noise_scheduler.timesteps[-1]:
-                    noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, **uncond)[0], unet(latents, t_batch, **cond)[0]
-                else: # use multi-scale features only for last step
-                    noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, **uncond)[1], unet(latents, t_batch, **cond)[1]
+                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, **uncond)[0], unet(latents, t_batch, **cond)[0]
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-    
+        
         # get detection results
-        latents = latents.permute(0, 2, 3, 1)            
-        latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-        det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
+        # latents = latents.permute(0, 2, 3, 1)            
+        # latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
+        # det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
+        
+        # extract multi-scale features
+        t_test = [0, 1, 10, 50, 100, 200, 300, 500, 700, 1000]
+        cond = get_dino(img, img_metas)    
+        t_final = torch.tensor([50] * latents.shape[0], device=latents.device)  
+        multi_feat = unet(latents, t_final, **cond)[1]  
+        
+        multi_feat = multi_feat.permute(0, 2, 3, 1)            
+        multi_feat = multi_feat.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
+        det_result = bev_model(return_loss=False, only_bev=False, given_bev=multi_feat, rescale=True, **batch)
         
         if isinstance(det_result, dict):
             if 'bbox_results' in det_result.keys():

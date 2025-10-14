@@ -37,3 +37,4 @@ class MultiScaleConcat(nn.Module):
         fused = torch.cat([f0, f1, f2], dim=1) if self.use_concat else (f0 + f1 + f2)/3.0
         out = self.mix(fused)
         return out                              # [B,out_dim,H,W]
+

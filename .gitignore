@@ -17,6 +17,7 @@ train/
 test/
 val/
 results/
+figures/
 work_dirs/
 develop-eggs/
 dist/
