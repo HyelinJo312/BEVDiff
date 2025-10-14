@@ -39,7 +39,7 @@ from mmseg import __version__ as mmseg_version
 
 from mmcv.utils import TORCH_VERSION, digit_version
 # from BEVFormer.tools.bevdiffuser import BEVDiffuser
-from bevdiffuser import BEVDiffuser
+from bevdiffuser_dino import BEVDiffuser
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')

@@ -136,8 +136,8 @@ def custom_train_detector(model,
             cfg.runner,
             default_args=dict(
                 model=model,
-                # model_target=model_target,
-                # bev_diffuser=bev_diffuser,
+                model_target=model_target,    # use this for DiffBEVFormer
+                bev_diffuser=bev_diffuser,    # use this for DiffBEVFormer
                 optimizer=optimizer,
                 work_dir=cfg.work_dir,
                 logger=logger,

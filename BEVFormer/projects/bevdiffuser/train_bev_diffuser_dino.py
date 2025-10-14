@@ -155,8 +155,6 @@ def train():
         
     # Get DINOv2 feature extractor
     get_dino = GetDINOv2Cond()
-    
-    multi_scale_concat = MultiScaleConcat(in_chs=(256,512,1024), out_dim=256, mid=256, use_concat=True)
 
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
 
@@ -275,8 +273,8 @@ def train():
 
 
     
-    unet, multi_scale_concat, optimizer, lr_scheduler = accelerator.prepare(
-        unet, multi_scale_concat, optimizer, lr_scheduler
+    unet, optimizer, lr_scheduler = accelerator.prepare(
+        unet, optimizer, lr_scheduler
     )
 
 
@@ -405,18 +403,12 @@ def train():
                 cond = get_dino(img, img_metas)
                 
                 # Predict the noise residual and compute loss
-                # model_pred = unet(noisy_latents, timesteps, **cond)[0]
-                multi_feats = unet(noisy_latents, timesteps, **cond)
-                
-                # Concat multi-scale features
-                denoise_feat = multi_scale_concat(multi_feats)
-                
-                model_pred = multi_feats[0]
+                model_pred = unet(noisy_latents, timesteps, **cond)[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
                 if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
-                    task_loss = get_task_loss(denoise_feat, **batch)
+                    task_loss = get_task_loss(model_pred, **batch)
                 else:
                     task_loss = 0
                     

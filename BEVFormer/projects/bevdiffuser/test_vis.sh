@@ -1,6 +1,6 @@
 set -e
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 BEV_CONFIG="../configs/bevdiffuser/layout_tiny_dino.py"
 
@@ -19,7 +19,7 @@ export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
 
 
-python -m torch.distributed.launch --master_port 9996 test_bev_diffuser_dino_v2.py \
+python -m torch.distributed.launch --master_port 9997 test_bev_diffuser_dino_v2_vis.py \
     --bev_config $BEV_CONFIG \
     --bev_checkpoint $BEV_CHECKPOINT \
     --checkpoint_dir $CHECKPOINT_DIR \

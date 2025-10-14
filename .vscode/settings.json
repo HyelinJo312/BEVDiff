@@ -1,5 +1,11 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
-    "python-envs.pythonProjects": []
+    "python-envs.pythonProjects": [
+        {
+            "path": "results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_dino_v2_new_global_adapter_constant-lr/checkpoint-60000/visualize/pca_bev_signed",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
+        }
+    ]
 }

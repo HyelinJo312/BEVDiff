@@ -243,36 +243,19 @@ def train():
         nonshuffler_sampler=bev_cfg.data.nonshuffler_sampler,
     )
     
-    def get_condition(batch):
-        cond = {}
-        
-        if 'layout_obj_classes' in batch:
-            cond['obj_class'] = torch.stack(batch['layout_obj_classes'].data[0])
-        if 'layout_obj_bboxes' in batch:
-            cond['obj_bbox'] = torch.stack(batch['layout_obj_bboxes'].data[0])
-        if 'layout_obj_is_valid' in batch:
-            cond['is_valid_obj'] = torch.stack(batch['layout_obj_is_valid'].data[0]) 
-        if 'layout_obj_names' in batch:
-            cond['obj_name'] = torch.stack(batch['layout_obj_names'].data[0])
-        
+    def get_dino_cond(dino_out):
         if np.random.rand() < args.uncond_prob:
-            if isinstance(unet.module, LayoutDiffusionUNetModel):
-                if 'obj_class' in unet.module.layout_encoder.used_condition_types:
-                    cond['obj_class'] = torch.ones_like(cond['obj_class']).fill_(unet.module.layout_encoder.num_classes_for_layout_object - 1)
-                    cond['obj_class'][:, 0] = unet.module.layout_encoder.num_classes_for_layout_object - 2
-                if 'obj_name' in unet.module.layout_encoder.used_condition_types:
-                    cond['obj_name'] = torch.stack(batch['default_obj_names'].data[0])
-                if 'obj_bbox' in unet.module.layout_encoder.used_condition_types:
-                    cond['obj_bbox'] = torch.zeros_like(cond['obj_bbox'])
-                    if unet.module.layout_encoder.use_3d_bbox:
-                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 0, 1, 1, 1, 0, 0, 0])
-                    else:
-                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 1, 1])
-                cond['is_valid_obj'] = torch.zeros_like(cond['is_valid_obj'])
-                cond['is_valid_obj'][:, 0] = 1.0  
-                 
+            uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                        for k, v in dino_out.items()}
+            last_cls_u = torch.zeros_like(dino_out['last_cls'])  # (B,V,C_in)
+            last_tokens_u = torch.zeros_like(dino_out['last_tokens'])  # (B,V,N,C_in)
+            uncond['last_cls'] = last_cls_u
+            uncond['last_tokens'] = last_tokens_u
+            cond = uncond
+        else:
+            cond = dino_out
+            
         return cond
-
 
     
     unet, optimizer, lr_scheduler = accelerator.prepare(
@@ -397,16 +380,16 @@ def train():
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 
-                # cond = get_condition(batch)
                 img = batch['img'].data[0]
                 len_queue = img.size(1)
                 img = img[:, -1, ...]
                 img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
-                cond = get_dino(img, img_metas)
+                dino_out = get_dino(img, img_metas)
+                cond = get_dino_cond(dino_out)
                 
                 # Predict the noise residual and compute loss
                 # model_pred = unet(noisy_latents, timesteps, **cond)[0]
-                model_pred, multi_feat = unet(noisy_latents, timesteps, **cond)
+                model_pred, multi_feat, _ = unet(noisy_latents, timesteps, **cond)
                 
                 # Concat multi-scale features
                 # denoise_feat = multi_scale_concat(multi_feats)
@@ -494,7 +477,7 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step in [30000, 50000]:
+                    if global_step > 20000:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')
@@ -507,9 +490,9 @@ def train():
                                                     bev_cfg=bev_cfg,
                                                     eval='bbox',
                                                     save_path=eval_path,
-                                                    noise_timesteps=5,
-                                                    denoise_timesteps=5,
-                                                    num_inference_steps=5,
+                                                    noise_timesteps=0,
+                                                    denoise_timesteps=0,
+                                                    num_inference_steps=0,
                                                     use_classifier_guidence=False)
 
                         if accelerator.is_main_process and args.report_to == "wandb":
