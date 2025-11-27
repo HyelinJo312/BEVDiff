@@ -1027,7 +1027,7 @@ class UNetModel(nn.Module):
         # self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, pool='mean')
         self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=1024, num_views=6)
         
-        self.aligner = DINOBevAligner(c_dino=dino_dim, c_ctx=None)
+        self.aligner = DINOBevAligner(c_dino=dino_dim, c_ctx=context_dim)
         # self.aligner = DINOBevAlignerMultiLayer(c_single=dino_dim)
         # self.aligner = DINOBevAlignerDeform(c_dino=dino_dim, c_ctx=dino_dim)
         

@@ -322,23 +322,14 @@ def evaluate(unet,
                 else:
                     _, multi_feat, out_list = unet(latents, t_batch, **cond)
    
+        # denoised_bev = latents.detach().clone()
         
         # extract multi-scale features
         cond = get_dino(img, img_metas)    
         t_test = torch.tensor([10] * latents.shape[0], device=latents.device)  
-        output, multi_feat, out_list = unet(latents, t_test, **cond) 
-        
-        # t_1 = torch.tensor([0] * latents.shape[0], device=latents.device)  
-        # output1, multi_feat1, output_feats1 = unet(latents, t_1, **cond) 
-        # t_2 = torch.tensor([10] * latents.shape[0], device=latents.device)  
-        # output2, multi_feat2, output_feats2 = unet(latents, t_2, **cond) 
-        # t_3 = torch.tensor([100] * latents.shape[0], device=latents.device)  
-        # output3, multi_feat3, output_feats3 = unet(latents, t_3, **cond) 
-        # t_4 = torch.tensor([999] * latents.shape[0], device=latents.device)  
-        # output4, multi_feat4, output_feats4 = unet(latents, t_4, **cond) 
-    
-        denoised_bev = latents.detach().clone()
-        
+        # output, multi_feat, out_list = unet(latents, t_test, **cond) 
+        output, out_list = unet(latents, t_test, **cond) 
+
         ## -------------------------------- PCA -------------------------------- ##
         
         #--------- version 1 : gaussian blur ---------
@@ -454,23 +445,23 @@ def evaluate(unet,
         # )
         
         #------- original feature & multi-scale features & concat feature -------
-        # f1, f2, f3, f4 = out_list
-        # render_unet_intermediates_four(
-        #     pre_bchw=original_bev,          # ← pre-UNet
-        #     f1_bchw=f1, f2_bchw=f2, f3_bchw=f3, f4_bchw=f4,  # 중간/출력들
-        #     concat_bchw=multi_feat,       # ← multi-scale concat
-        #     b=0,
-        #     nusc=nusc, sample_token=sample_token,
-        #     out_dir=f"{save_path}/visualize/unet_intermediates_v2",
-        #     title=f"step {step} | UNet features",
-        #     mode="energy", agg="l1", whiten=True,
-        #     smooth_sigma=0.8,
-        #     joint_clip=(2,98), gamma=1.0,
-        #     bev_cmap="viridis", bev_interp="bilinear",
-        #     bev_extent=extent, bev_origin="lower",
-        #     lidar_axes_limit=50.0,
-        #     figsize=(30, 5), dpi=300, show=False
-        # )
+        f1, f2, f3, f4 = out_list
+        render_unet_intermediates_four(
+            pre_bchw=original_bev,          # ← pre-UNet
+            f1_bchw=f1, f2_bchw=f2, f3_bchw=f3, f4_bchw=f4,  # 중간/출력들
+            concat_bchw=output,       # ← multi-scale concat
+            b=0,
+            nusc=nusc, sample_token=sample_token,
+            out_dir=f"{save_path}/visualize/unet_intermediates",
+            title=f"step {step} | UNet features",
+            mode="energy", agg="l1", whiten=True,
+            smooth_sigma=0.8,
+            joint_clip=(2,98), gamma=1.0,
+            bev_cmap="viridis", bev_interp="bilinear",
+            bev_extent=extent, bev_origin="lower",
+            lidar_axes_limit=50.0,
+            figsize=(30, 5), dpi=300, show=False
+        )
         
         # render_sixcams_lidar_bev(
         #     pre_bchw=original_bev,          # ← pre-UNet

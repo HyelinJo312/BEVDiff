@@ -225,6 +225,7 @@ def evaluate(unet,
              denoise_timesteps=0,
              num_inference_steps=0,
              use_classifier_guidence=False):
+             
     def get_classifier_gradient(x, **kwargs):
         x_ = x.detach().requires_grad_(True)
         x_ = x_.permute(0, 2, 3, 1)
@@ -297,7 +298,7 @@ def evaluate(unet,
         # extract multi-scale features
         t_test = [0, 1, 10, 50, 100, 200, 300, 500, 700, 1000]
         cond = get_dino(img, img_metas)    
-        t_final = torch.tensor([50] * latents.shape[0], device=latents.device)  
+        t_final = torch.tensor([10] * latents.shape[0], device=latents.device)  
         multi_feat = unet(latents, t_final, **cond)[1]  
         
         multi_feat = multi_feat.permute(0, 2, 3, 1)            

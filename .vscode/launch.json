@@ -9,12 +9,12 @@
             "request": "launch",
             //"module": "torch.distributed.launch",
             //"justMyCode": true,
-            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_dino_v2.py",
+            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_dino.py",
             // "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_original.py",
             "console": "integratedTerminal",
             "args": [
         
-                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_dino.py", 
+                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_dino_2d.py",
                 // "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny.py", 
                 "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--pretrained_unet_checkpoint", "None",
@@ -41,7 +41,7 @@
 
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "1",
                 "RANK": "0",
                 "LOCAL_RANK": "0",
                 "WORLD_SIZE": "1",
@@ -92,16 +92,16 @@
             "request": "launch",
             //"module": "torch.distributed.launch",
             //"justMyCode": true,
-            "program": "${workspaceFolder}/BEVFormer/tools/train.py",
+            "program": "${workspaceFolder}/BEVFormer/tools/train_dino_gt.py",
             "console": "integratedTerminal",
             "args": [
-                "${workspaceFolder}/BEVFormer/projects/configs/diff_bevformer/layout_tiny_dino.py",
+                "${workspaceFolder}/BEVFormer/projects/configs/diff_bevformer/layout_tiny_dino_gt.py",
                 // "--launcher", "None",
                 "--deterministic",
                 "--work_dir", "${workspaceFolder}/results_debug",
                 "--tracker_project_name", "DiffBEVFormer_debug",
                 "--tracker_run_name", "BEVFormer_tiny_with_BEVDiffuser_debug", 
-                "--unet_checkpoint_dir", "${workspaceFolder}/results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_dino_v2_new_global_adapter_constant-lr/checkpoint-60000",
+                "--unet_checkpoint_dir", "${workspaceFolder}/results/stage1/BEVDiffuser_tiny_GT-dino_v4_with-mid/checkpoint-50000",
                 "--load_from", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--resume_from", "None",
                 "--report_to", "tensorboard"
