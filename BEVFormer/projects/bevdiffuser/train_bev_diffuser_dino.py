@@ -52,15 +52,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))+"/..
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from mmdet.apis import set_random_seed
 
-from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
-from ldm.modules.diffusionmodules.openaimodel import UNetModel
+from layout_diffusion.layout_dino_diffusion_unet_v2 import LayoutDiffusionUNetModel
 from scheduler_utils import DDIMGuidedScheduler
-from model_utils import get_bev_model, build_unet, instantiate_from_config
+from model_utils import get_bev_model, build_unet
 from test_bev_diffuser_dino import evaluate
 from torch.utils.tensorboard import SummaryWriter
 from projects.bevdiffuser.fm_feature import GetDINOv2Cond
-from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
-
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -145,14 +142,14 @@ def train():
         loss, _ = bev_model.module._parse_losses(losses)
         return loss
     
-    unet = instantiate_from_config(bev_cfg.unet)
+    unet = build_unet(bev_cfg.unet)
     if args.pretrained_unet_checkpoint is not None and (os.path.isfile(args.pretrained_unet_checkpoint) or os.path.isdir(args.pretrained_unet_checkpoint)):
         unet.from_pretrained(args.pretrained_unet_checkpoint, subfolder="unet")
         # train only the downsample and upsample layers
         unet.requires_grad_(False)
         unet.downsample_blocks.requires_grad_(True)
         unet.upsample_blocks.requires_grad_(True)
-        
+
     # Get DINOv2 feature extractor
     get_dino = GetDINOv2Cond()
 
@@ -271,6 +268,18 @@ def train():
                  
         return cond
 
+    def get_dino_cond(dino_out):
+        if np.random.rand() < args.uncond_prob:
+            uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                        for k, v in dino_out.items()}
+            last_cls_u = torch.zeros_like(dino_out['last_cls'])  # (B,V,C_in)
+            last_tokens_u = torch.zeros_like(dino_out['last_tokens'])  # (B,V,N,C_in)
+            uncond['last_cls'] = last_cls_u
+            uncond['last_tokens'] = last_tokens_u
+            cond = uncond
+        else:
+            cond = dino_out
+        return cond
 
     
     unet, optimizer, lr_scheduler = accelerator.prepare(
@@ -287,7 +296,7 @@ def train():
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
-
+    
     tb_writer = None
     
     # We need to initialize the trackers we use, and also store our configuration.
@@ -340,7 +349,7 @@ def train():
     if args.resume_from_checkpoint:
         resume_path = args.resume_from_checkpoint
 
-        accelerator.logger.info(f"Resuming from checkpoint {resume_path}")
+        logger.info(f"Resuming from checkpoint {resume_path}")
         accelerator.load_state(resume_path)
         global_step = int(resume_path.split("-")[-1])
 
@@ -394,16 +403,19 @@ def train():
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-                
-                # cond = get_condition(batch)
+
                 img = batch['img'].data[0]
                 len_queue = img.size(1)
                 img = img[:, -1, ...]
                 img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
-                cond = get_dino(img, img_metas)
+                dino_out = get_dino(img, img_metas)
+                dino_cond = get_dino_cond(dino_out)
+
+                cond = get_condition(batch)
                 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_latents, timesteps, **cond)[0]
+                # model_pred, multi_feat, _ = unet(noisy_latents, timesteps, dino_cond, **cond)
+                model_pred = unet(noisy_latents, timesteps, dino_cond, **cond)
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -413,7 +425,7 @@ def train():
                     task_loss = 0
                     
                 total_loss = denoise_loss + args.task_loss_scale * task_loss
-
+                
                 # get learing rate
                 lr = lr_scheduler.get_last_lr()[0]
 
@@ -693,7 +705,7 @@ def parse_args():
     parser.add_argument(
         "--prediction_type",
         type=str,
-        default="sample",
+        default=None,
         help="The prediction_type that shall be used for training. Choose between 'epsilon' or 'sample' or 'v_prediction' or leave `None`. If left to `None` the default prediction type of the scheduler: `noise_scheduler.config.prediction_type` is chosen.",
     )
 

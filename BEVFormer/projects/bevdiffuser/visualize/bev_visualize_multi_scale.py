@@ -97,17 +97,21 @@ def _aggregate_energy(feat_2d, agg="l1", whiten=True, eps=1e-6):
         e = np.mean(z, 1)
     return e.astype(np.float32)
 
+# def _get_color(nusc: NuScenes, category_name: str):
+#     if category_name == 'bicycle':
+#         return np.array(nusc.colormap['vehicle.bicycle']) / 255.0
+#     if category_name == 'construction_vehicle':
+#         return np.array(nusc.colormap['vehicle.construction']) / 255.0
+#     if category_name == 'traffic_cone':
+#         return np.array(nusc.colormap['movable_object.trafficcone']) / 255.0
+#     for key in nusc.colormap.keys():
+#         if category_name in key:
+#             return np.array(nusc.colormap[key]) / 255.0
+#     return np.array([0, 0, 0], dtype=np.float32)
+
 def _get_color(nusc: NuScenes, category_name: str):
-    if category_name == 'bicycle':
-        return np.array(nusc.colormap['vehicle.bicycle']) / 255.0
-    if category_name == 'construction_vehicle':
-        return np.array(nusc.colormap['vehicle.construction']) / 255.0
-    if category_name == 'traffic_cone':
-        return np.array(nusc.colormap['movable_object.trafficcone']) / 255.0
-    for key in nusc.colormap.keys():
-        if category_name in key:
-            return np.array(nusc.colormap[key]) / 255.0
-    return np.array([0, 0, 0], dtype=np.float32)
+    # Dark orange로 모든 bbox 색상 통일
+    return np.array([1.0, 0.55, 0.0], dtype=np.float32)
 
 # -------------- LiDAR_TOP pane --------------
 def _draw_lidar_top_on_axes(nusc, sample_token, ax,
@@ -286,6 +290,136 @@ def render_unet_intermediates_four(
     items = []
     # if pre_bchw is not None: items.append(("original", pre_bchw))
     if f1_bchw  is not None: items.append(("mid-block 12×12", f1_bchw))
+    if f2_bchw  is not None: items.append(("out-block 12×12", f2_bchw))
+    if f3_bchw  is not None: items.append(("out-block 25×25", f3_bchw))
+    if f4_bchw  is not None: items.append(("out-block 50×50", f4_bchw))
+    if concat_bchw is not None: items.append(("multi-scale concat", concat_bchw))
+    if pre_bchw is not None: items.append(("original", pre_bchw))
+
+    if not items:
+        raise ValueError("시각화할 feature가 없습니다 (pre_bchw, f1..f4_bchw, concat_bchw 중 하나 이상 필요).")
+
+    # 사용자 labels가 있으면 대체
+    if labels is not None:
+        # 마지막 LiDAR 제목까지 포함해도 되고, 안 넣어도 상관 없음
+        # feature 개수와 맞지 않으면 자동 생성으로 fallback
+        if isinstance(labels, (list, tuple)) and len(labels) >= len(items):
+            names = list(labels[:len(items)])
+        else:
+            names = [n for n, _ in items]
+    else:
+        names = [n for n, _ in items]
+
+    # -------- 2) 모양/인덱스 검사 + BEV map 생성 --------
+    maps = []
+    for i, (name, F) in enumerate(items):
+        F = _to_numpy(F)
+        if F.ndim != 4:
+            raise ValueError(f"[{name}] must be [B,C,H,W], got {F.shape}")
+        if not (0 <= b < F.shape[0]):
+            raise IndexError(f"[{name}] batch index {b} out of range (B={F.shape[0]})")
+
+        _, C, H, W = F.shape
+        feat_2d = F[b].reshape(C, H*W).T  # [N,C]
+
+        if mode == "energy":
+            m = _aggregate_energy(feat_2d, agg=agg, whiten=whiten).reshape(H, W)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+        m = _gaussian_blur_np(m, sigma=smooth_sigma) if smooth_sigma > 0 else m
+        maps.append(m)
+
+    # -------- 3) joint normalization (모든 맵 공정 비교) --------
+    # scaled_maps = _percentile_norm_multi(maps, p_low=joint_clip[0], p_high=joint_clip[1])
+    scaled_maps = _per_map_zscore_then_clip(maps, p_low=joint_clip[0], p_high=joint_clip[1])
+    if gamma != 1.0:
+        scaled_maps = [np.power(m, gamma).astype(np.float32) for m in scaled_maps]
+    vmins = [0.0] * len(maps); vmaxs = [1.0] * len(maps)
+
+    # -------- 4) 그리기 (features + LiDAR) --------
+    n_feat = len(scaled_maps)
+    n_cols = n_feat + 1  # + LiDAR
+    fig, axes = plt.subplots(1, n_cols, figsize=figsize, dpi=dpi)
+
+    # feature panes
+    for ax, m, vmin, vmax, lab in zip(axes[:n_feat], scaled_maps, vmins, vmaxs, names):
+        ax.imshow(
+            m, cmap=bev_cmap, vmin=vmin, vmax=vmax, interpolation=bev_interp,
+            extent=bev_extent, origin=bev_origin
+        )
+        ax.set_aspect('equal')
+        if bev_extent is not None:
+            ax.set_xlim(bev_extent[0], bev_extent[1])
+            ax.set_ylim(bev_extent[2], bev_extent[3])
+        ax.set_title(lab, fontsize=20); ax.axis('off')
+
+    # LiDAR pane (마지막)
+    lidar_ax = axes[-1]
+    if (nusc is not None) and (sample_token is not None):
+        _draw_lidar_top_on_axes(
+            nusc, sample_token, lidar_ax,
+            view=lidar_view,
+            box_vis_level=BoxVisibility.ANY,
+            axes_limit=lidar_axes_limit,
+            show_boxes=lidar_show_boxes,
+            lidar_render_mode="scatter",
+            lidar_cmap="viridis",
+            pts_size=2.1,
+            pts_stride=1,
+            pts_alpha=0.9,
+            box_lw=0.8,
+            bev_extent=bev_extent
+        )
+        lidar_ax.set_title("LiDAR Top")
+    else:
+        lidar_ax.text(0.5, 0.5, "LiDAR_TOP unavailable",
+                      ha="center", va="center", fontsize=20)
+        lidar_ax.axis('off'); lidar_ax.set_aspect('equal')
+        lidar_ax.set_title("LiDAR Top View")
+
+    if title:
+        fig.suptitle(title, y=0.99)
+
+    if out_dir is not None:
+        out_file = _ensure_outfile(out_dir, title or "unet_intermediates")
+        plt.savefig(out_file, bbox_inches='tight', pad_inches=0.0, dpi=dpi)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    # label → map (raw or scaled) 딕셔너리 반환
+    out = {}
+    for lab, m in zip(names, maps):
+        out[lab] = m
+    return out
+
+
+# -------------- MAIN: Original feature + 3 UNet features + Concat feature + LiDAR TOP --------------
+def render_unet_intermediates_three(
+    pre_bchw=None,                 # ← pre-UNet BEV feature (e.g., original_bev)
+    f2_bchw=None, f3_bchw=None, f4_bchw=None,   # 기존 intermediate들
+    concat_bchw=None,              # ← 마지막 multi-scale concat feature
+    b=0,
+    nusc: NuScenes = None,
+    sample_token: str = None,
+    out_dir: str = None,
+    title: str = None,
+    labels=None,                   # 자동 생성(넘기면 그대로 사용)
+    mode="energy",                 # 'energy' | 'pca_pc3'
+    agg="l1", whiten=True,         # for energy
+    smooth_sigma=0.8,
+    joint_clip=(2.0, 98.0), gamma=1.0,
+    bev_cmap="viridis", bev_interp="nearest",
+    bev_extent=None, bev_origin="lower",
+    # LiDAR params
+    lidar_axes_limit=50.0, lidar_view=np.eye(4), lidar_show_boxes=True,
+    # canvas
+    figsize=(26, 4.8), dpi=260, show=False
+):
+    # -------- 1) 입력 정리: 존재하는 feature만 순서대로 쌓기 --------
+    items = []
+    # if pre_bchw is not None: items.append(("original", pre_bchw))
     if f2_bchw  is not None: items.append(("out-block 12×12", f2_bchw))
     if f3_bchw  is not None: items.append(("out-block 25×25", f3_bchw))
     if f4_bchw  is not None: items.append(("out-block 50×50", f4_bchw))
@@ -602,7 +736,8 @@ def render_unet_intermediates_all(
         if Fnp.ndim != 4: raise ValueError(f"[inter{i}] must be [B,C,H,W], got {Fnp.shape}")
         if not (0 <= b < Fnp.shape[0]): raise IndexError(f"[inter{i}] batch {b} out of range")
         _, _, H, W = Fnp.shape
-        lab = f"inter{i} proj" if i == 9 else f"inter{i} {H}x{W}"
+        # lab = f"inter{i} proj" if i == 9 else f"inter{i} {H}x{W}"
+        lab = f"mid-block {H}x{W}" if i == 0 else f"inter{i} {H}x{W}"
         items.append((lab, Fnp)); names.append(lab)
 
     pre_np    = _to_numpy(pre_bchw)
@@ -612,7 +747,8 @@ def render_unet_intermediates_all(
     if not (0 <= b < pre_np.shape[0]):    raise IndexError(f"[original] batch {b} out of range")
     if not (0 <= b < concat_np.shape[0]): raise IndexError(f"[concat]   batch {b} out of range")
     items.append(("original", pre_np));  names.append("original")
-    items.append(("concat",   concat_np)); names.append("concat")
+    # items.append(("concat",   concat_np)); names.append("concat")
+    items.append(("proj output", concat_np)); names.append("proj output")
 
     # -------------------- 맵 생성 --------------------
     maps = []
@@ -670,7 +806,8 @@ def render_unet_intermediates_all(
 
     ax_concat.imshow(scaled_maps[11], cmap=bev_cmap, vmin=vmins[11], vmax=vmaxs[11],
                      interpolation=bev_interp, extent=bev_extent, origin=bev_origin)
-    ax_concat.set_aspect('equal'); ax_concat.axis('off'); ax_concat.set_title("concat", fontsize=8)
+    # ax_concat.set_aspect('equal'); ax_concat.axis('off'); ax_concat.set_title("concat", fontsize=8)
+    ax_concat.set_aspect('equal'); ax_concat.axis('off'); ax_concat.set_title("proj output", fontsize=8)
 
     if (nusc is not None) and (sample_token is not None):
         _draw_lidar_top_on_axes(

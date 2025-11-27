@@ -11,7 +11,7 @@ from collections import OrderedDict
 # import lightning as L
 from typing import Optional
 import math
-from transformers import AutoImageProcessor, Dinov2Model
+from transformers import AutoImageProcessor, Dinov2Model, AutoModel
 from transformers import CLIPProcessor, CLIPVisionModel
 
 NUM_DECONV = 3
@@ -81,7 +81,9 @@ class GetDINOv2Cond(nn.Module):
         self.patch = patch
         self.symmetric_pad = symmetric_pad
 
-        self.model = Dinov2Model.from_pretrained("facebook/dinov2-base").to(self.device)
+        # self.model = Dinov2Model.from_pretrained("facebook/dinov2-base").to(self.device)
+        self.model = AutoModel.from_pretrained('facebook/dinov2-base').to(self.device)
+        # self.model = AutoModel.from_pretrained("facebook/dinov2-with-registers-base").to(self.device)
         # self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
         self.model.requires_grad_(False)
         for p in self.model.parameters():
@@ -143,23 +145,6 @@ class GetDINOv2Cond(nn.Module):
         Hp, Wp = H2 // self.patch, W2 // self.patch
         return x, Hp, Wp, extra_geom
     
-
-    # def _preprocess(self, x: torch.Tensor) -> torch.Tensor: 
-    #     """ x: (Bflat, 3, H, W) float tensor in [0,1] or [0,255] 
-    #     -> (Bflat, 3, S, S) normalized to ImageNet stats 
-    #     """ 
-
-    #     x = x.to(self.device, dtype=torch.float32) 
-    #     if x.max() > 1.5: 
-    #         # if likely in [0,255] 
-    #         x = x / 255.0 
-    #     if (x.shape[-2] != self.input_min) or (x.shape[-1] != self.input_min): 
-    #         x = F.interpolate(x, size=(self.input_min, self.input_min), mode='bicubic', align_corners=False) 
-
-    #     x = (x - self.imgnet_mean) / self.imgnet_std 
-    #     return x
-    
-
     def forward(self, images, img_metas, n_layers=4):
         """
         images: (B, 6, C, H, W) or (6, C, H, W) when bs=1
@@ -185,7 +170,7 @@ class GetDINOv2Cond(nn.Module):
             outputs = self.model(pixel_values=x, output_hidden_states=True)
         hidden_states = outputs.hidden_states
         hs_selected = hidden_states[-n_layers:] if n_layers > 0 else [hidden_states[-1]]
-
+        
         feats_out = []
         cls_out = []
         for h in hs_selected:

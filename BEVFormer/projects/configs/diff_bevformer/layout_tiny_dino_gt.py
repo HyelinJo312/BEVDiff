@@ -53,7 +53,7 @@ use_3d_bbox = True
 
 unet = dict(
     # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
-    type='layout_diffusion.layout_dino_diffusion_unet_v2.LayoutDiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.layout_dino_diffusion_unet_v2.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -79,7 +79,7 @@ unet = dict(
         use_positional_embedding_for_attention=True,
         attention_block_type='ObjectAwareCrossAttention',
         layout_encoder=dict(
-            type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
+            type='projects.bevdiffuser.layout_diffusion.layout_encoder.LayoutTransformerEncoder',
             parameters=dict(
                 used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
                 layout_length=num_bboxes,
@@ -98,11 +98,25 @@ unet = dict(
     )
 )
 
+bev_diffuser_cfg=dict(
+    unet_cfg=unet,
+    unet_checkpoint_dir=None,
+    pretrained_model_name_or_path="stabilityai/stable-diffusion-2-1",
+    prediction_type="sample",
+    noise_timesteps=5,
+    denoise_timesteps=5,
+    num_inference_steps=5,
+    use_classifier_guidence=False)
+
+find_unused_parameters=False
+
+train_task_decoder = True
+
 model = dict(
-    type='BEVFormer',
+    type='DiffBEVFormerDINOGT',
     use_grid_mask=True,
     video_test_mode=True,
-    # pretrained=dict(img='torchvision://resnet50'),
+    pretrained=dict(img='torchvision://resnet50'),
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -111,8 +125,8 @@ model = dict(
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
-        style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')), 
+        style='pytorch'),
+        # init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')), 
     img_neck=dict(
         type='FPN',
         in_channels=[2048],
@@ -222,7 +236,10 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-data_root = '../../data/nuscenes/'
+# data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/'
+# info_root = "/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/" # bevformer info
+# data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/'
+data_root = 'data/nuscenes/'
 # data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
@@ -243,7 +260,7 @@ train_pipeline = [
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
+   
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1600, 900),
@@ -256,7 +273,7 @@ test_pipeline = [
                 type='DefaultFormatBundle3D',
                 class_names=class_names,
                 with_label=False),
-            dict(type='CustomCollect3D', keys=['gt_bboxes_3d', 'gt_labels_3d','img'])
+            dict(type='CustomCollect3D', keys=['img'])
         ])
 ]
 
@@ -293,10 +310,10 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=2e-4,
+    lr=3e-4,
     paramwise_cfg=dict(
         custom_keys={
-            'img_backbone': dict(lr_mult=0.1),
+            'img_backbone': dict(lr_mult=0.5),
         }),
     weight_decay=0.01)
 
@@ -309,9 +326,9 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=1, pipeline=test_pipeline)
+evaluation = dict(interval=12, pipeline=test_pipeline)
 
-runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
+runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
 
 log_config = dict(
     interval=50,
@@ -320,4 +337,8 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=12)
+
+custom_hooks = [
+    dict(type='UpdateTarget', epoch_interval=0)
+]

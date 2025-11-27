@@ -3,20 +3,20 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 GPUS=$1
 PORT=${PORT:-28508}
 
-CONFIG="./projects/configs/diff_bevformer/layout_tiny_dino.py"
-UNET_CHECKPOINT_DIR="../results/pretrain_stage1/BEVDiffuser_BEVFormer_tiny_dino_v2_new_global_adapter_constant-lr/checkpoint-60000"
+CONFIG="./projects/configs/diff_bevformer/layout_tiny_dino_gt.py"
+UNET_CHECKPOINT_DIR="../results/stage1/BEVDiffuser_tiny_GT-dino_only-dino/checkpoint-50000"
 # UNET_CHECKPOINT_DIR="./train/BEVDiffuser_BEVFormer_tiny_original/checkpoint-30000"
 LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
 RESUME_FROM=None
-RUN_NAME="DiffBEVFormer_tiny_dino_v2"
-WORK_DIR="../results/pretrain_stage2"
+RUN_NAME="DiffBEVFormer_tiny_dino_gt"
+WORK_DIR="../results/stage2"
 
-export PYTHONWARNINGS="ignore"
+# export PYTHONWARNINGS="ignore"
 
 PYTHONPATH="$(dirname $0)/..":$PYTHONPATH \
 # python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port=$PORT \
-torchrun --nproc_per_node=4 --master_port=29507 \
-    $(dirname "$0")/train.py $CONFIG \
+torchrun --nproc_per_node=4 --master_port=29505 \
+    $(dirname "$0")/train_dino_gt.py $CONFIG \
     --launcher pytorch ${@:3} \
     --deterministic \
     --work_dir=$WORK_DIR \

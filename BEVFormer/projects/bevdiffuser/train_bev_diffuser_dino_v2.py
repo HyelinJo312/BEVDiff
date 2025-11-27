@@ -254,7 +254,6 @@ def train():
             cond = uncond
         else:
             cond = dino_out
-            
         return cond
 
     
@@ -388,12 +387,7 @@ def train():
                 cond = get_dino_cond(dino_out)
                 
                 # Predict the noise residual and compute loss
-                # model_pred = unet(noisy_latents, timesteps, **cond)[0]
                 model_pred, multi_feat, _ = unet(noisy_latents, timesteps, **cond)
-                
-                # Concat multi-scale features
-                # denoise_feat = multi_scale_concat(multi_feats)
-                # model_pred = multi_feats[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 

@@ -305,84 +305,91 @@ class MultiScaleConcatWeighted(nn.Module):
         return self.out_layer(x)
 
 
-
-class MultiScaleConcatWeightedV2(nn.Module):
-    def __init__(self, in_chs=[256, 512, 1024], out_dim=256, mid=256, T=1.0):
+class MultiScaleWeightedSum(nn.Module):
+    def __init__(self, in_chs=[256, 512, 1024, 1024], out_dim=256, mid=256, T=1.0):
         """
-        Learned weighted fusion for 3 scales (x0, x1, x2).
-        Stage A: x1 (H/2) ⟷ up(x2)->(H/2)
-        Stage B: x0 (H)   ⟷ up(f1)->(H)
+        - len(in_chs) == len(xs)
+        - xs[0]의 해상도로 모두 upsample
+        - upsample 후 bottleneck으로 채널을 mid로 통일
+        - spatial softmax로 scale별 weight 구해서 weighted-sum
         """
         super().__init__()
-        C0, C1, C2 = in_chs
+        self.in_chs = in_chs
+        self.num_scales = len(in_chs)
         self.T = T
+        self.mid = mid
 
-        # --- Gating heads (branch logits: 1ch) ---
-        # Stage A: x1 vs up(x2)
-        self.g1   = nn.Conv2d(C1, 1, kernel_size=1)          # logits for x1
-        self.g2u  = nn.Conv2d(C2, 1, kernel_size=1)          # logits for up(x2)
+        # Upsampling 이후 bottleneck
+        self.bottlenecks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(c, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(32, mid),
+                nn.SiLU(inplace=True),
+            )
+            for c in in_chs
+        ])
 
-        # Stage B: x0 vs up(f1)  (f1 has C1+C2 channels)
-        self.g0   = nn.Conv2d(C0, 1, kernel_size=1)          # logits for x0
-        self.gf1u = nn.Conv2d(C1 + C2, 1, kernel_size=1)     # logits for up(f1)
+        # Bottleneck feature 기준 gate logits
+        self.gates = nn.ModuleList([
+            nn.Conv2d(mid, 1, kernel_size=1)
+            for _ in in_chs
+        ])
 
-        # --- Global scalar gates (learnable per-branch) ---
-        self.alpha2  = nn.Parameter(th.tensor(1.0))   # x2 branch (after upsample)
-        self.alpha1  = nn.Parameter(th.tensor(1.0))   # x1 branch
-        self.alphaf1 = nn.Parameter(th.tensor(1.0))   # f1 branch (after upsample)
-        self.alpha0  = nn.Parameter(th.tensor(2.0))   # x0 branch
+        # 스케일별 global scalar gate
+        self.alpha = nn.Parameter(th.ones(self.num_scales))
 
-        # --- Output head ---
-        # Input channels = C0 + C1 + C2  (x0 concat up(f2) where f2 is x1+up(x2))
+        # weighted-sum 이후 projection (입력 채널 = mid 하나뿐)
         self.out_layer = nn.Sequential(
-            nn.Conv2d(C0 + C1 + C2, 2*mid, kernel_size=1, bias=False),
-            nn.GroupNorm(32, 2*mid),
+            nn.Conv2d(mid, mid, kernel_size=1, bias=False),
+            nn.GroupNorm(32, mid),
             nn.SiLU(inplace=True),
-
-            nn.Conv2d(2*mid, 2*mid, kernel_size=3, padding=1, groups=2*mid, bias=False),
-            nn.GroupNorm(32, 2*mid),
+            nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False),
             nn.SiLU(inplace=True),
-
-            nn.Conv2d(2*mid, out_dim, kernel_size=1, bias=False),
-            nn.GroupNorm(16, out_dim),
+            nn.Conv2d(mid, out_dim, kernel_size=1, bias=False),
         )
 
-        # Balanced init
-        nn.init.zeros_(self.g1.bias);   nn.init.zeros_(self.g2u.bias)
-        nn.init.zeros_(self.g0.bias);   nn.init.zeros_(self.gf1u.bias)
+        for g in self.gates:
+            nn.init.zeros_(g.bias)
 
     def forward(self, xs):
-        # xs: (x0, x1, x2)
-        x0, x1, x2 = xs
-        B, _, H,  W  = x0.shape
-        _, _, H1, W1 = x1.shape
+        assert len(xs) == self.num_scales, \
+            f"Expected {self.num_scales} features, got {len(xs)}"
 
-        # ---------- Stage A: x1 ⟷ up(x2) at (H1, W1) ----------
-        x2u = F.interpolate(x2, (H1, W1), mode='bilinear', align_corners=False)
-        l1  = self.g1(x1)                      # (B,1,H1,W1)
-        l2u = self.g2u(x2u)                    # (B,1,H1,W1)
-        wa  = th.softmax(th.cat([l1, l2u], dim=1) / self.T, dim=1)   # (B,2,H1,W1)
-        w1, w2 = wa[:, :1], wa[:, 1:]
+        # 기준 해상도: 첫 번째 feature
+        B, _, H, W = xs[0].shape
 
-        # weighted-concat at stage A
-        f1 = th.cat([
-            self.alpha1 * w1.expand_as(x1)  * x1,
-            self.alpha2 * w2.expand_as(x2u) * x2u
-        ], dim=1)   # (B, C1+C2, H1, W1)
+        up_feats = []
+        logits = []
 
-        # ---------- Stage B: x0 ⟷ up(f1) at (H, W) ----------
-        f1u = F.interpolate(f1, (H, W), mode='bilinear', align_corners=False)
-        l0   = self.g0(x0)                     # (B,1,H,W)
-        lf1u = self.gf1u(f1u)                  # (B,1,H,W)
-        wb   = th.softmax(th.cat([l0, lf1u], dim=1) / self.T, dim=1) # (B,2,H,W)
-        w0, wf1 = wb[:, :1], wb[:, 1:]
+        for i, x in enumerate(xs):
+            # 1) 먼저 upsampling
+            if x.shape[-2:] != (H, W):
+                x_up = F.interpolate(
+                    x, size=(H, W), mode='bilinear', align_corners=False
+                )
+            else:
+                x_up = x
 
-        x = th.cat([
-            self.alpha0  * w0.expand_as(x0)  * x0,
-            self.alphaf1 * wf1.expand_as(f1u)* f1u
-        ], dim=1)   # (B, C0 + C1 + C2, H, W)
+            # 2) upsample 후 bottleneck
+            f = self.bottlenecks[i](x_up)      # (B, mid, H, W)
+            up_feats.append(f)
 
-        return self.out_layer(x)
+            # 3) gate logit (alpha로 스케일별 중요도 조절)
+            l = self.gates[i](f) * self.alpha[i]   # (B,1,H,W)
+            logits.append(l)
+
+        # 4) spatial softmax over scales → (B, N, H, W)
+        logits_cat = th.cat(logits, dim=1)
+        weights = th.softmax(logits_cat / self.T, dim=1)
+
+        # 5) weighted-sum over scales
+        #   feats: (B, N, mid, H, W), weights: (B, N, 1, H, W)
+        feats_stack = th.stack(up_feats, dim=1)          # (B, N, mid, H, W)
+        weights_exp = weights.unsqueeze(2)               # (B, N, 1, H, W)
+        fused = (feats_stack * weights_exp).sum(dim=1)   # (B, mid, H, W)
+
+        return self.out_layer(fused)
+
     
     
 class MultiScaleConcatThree(nn.Module):
