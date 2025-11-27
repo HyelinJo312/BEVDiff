@@ -1,6 +1,8 @@
 <div align="center">
 <h2> Original BEVDiffuser with DINOv2 Guidance </h2> 
+    
 **BEVDiffuser: Plug-and-Play Diffusion Model for BEV Denoising</br>with Ground-Truth Guidance**
+    
 **CVPR 2025 Highlight**
 
 
