@@ -285,25 +285,25 @@ def evaluate(unet,
             
             for _, t in enumerate(noise_scheduler.timesteps): # always use multi-scale features
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, **uncond)[0], unet(latents, t_batch, **cond)[0]
+                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, uncond), unet(latents, t_batch, cond)
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
         
         # get detection results
-        # latents = latents.permute(0, 2, 3, 1)            
-        # latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-        # det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
+        latents = latents.permute(0, 2, 3, 1)            
+        latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
+        det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
         
         # extract multi-scale features
-        t_test = [0, 1, 10, 50, 100, 200, 300, 500, 700, 1000]
-        cond = get_dino(img, img_metas)    
-        t_final = torch.tensor([10] * latents.shape[0], device=latents.device)  
-        multi_feat = unet(latents, t_final, **cond)[1]  
+        # t_test = [0, 1, 10, 50, 100, 200, 300, 500, 700, 1000]
+        # cond = get_dino(img, img_metas)    
+        # t_final = torch.tensor([10] * latents.shape[0], device=latents.device)  
+        # multi_feat = unet(latents, t_final, **cond)[1]  
         
-        multi_feat = multi_feat.permute(0, 2, 3, 1)            
-        multi_feat = multi_feat.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-        det_result = bev_model(return_loss=False, only_bev=False, given_bev=multi_feat, rescale=True, **batch)
+        # multi_feat = multi_feat.permute(0, 2, 3, 1)            
+        # multi_feat = multi_feat.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
+        # det_result = bev_model(return_loss=False, only_bev=False, given_bev=multi_feat, rescale=True, **batch)
         
         if isinstance(det_result, dict):
             if 'bbox_results' in det_result.keys():

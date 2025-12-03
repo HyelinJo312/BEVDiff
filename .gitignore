@@ -27,6 +27,7 @@ eggs/
 lib/
 lib64/
 parts/
+depth_map/
 sdist/
 var/
 wheels/

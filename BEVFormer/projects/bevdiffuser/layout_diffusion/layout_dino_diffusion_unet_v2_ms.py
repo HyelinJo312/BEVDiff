@@ -6,6 +6,10 @@
 # Copyright (c) 2023 LayoutDiffusion authors, licensed under the MIT license,
 # cf. 3rd-party-licenses.txt file in the root directory of this source tree.
 
+'''
+Extract features from Decoder Blocks[25x25, 50x50] for task head
+'''
+
 from abc import abstractmethod
 import os
 import safetensors
@@ -29,13 +33,7 @@ from diffusers.utils.constants import SAFETENSORS_WEIGHTS_NAME
 from projects.bevdiffuser.ldm.modules.attention import SpatialTransformer
 from mmcv.runner import force_fp32, auto_fp16
 from mmcv.utils import TORCH_VERSION, digit_version
-
-from .dino_utils import (
-    build_bev_xy_grid,
-    project_lidar2img,
-    uv_to_patch_grid,
-    masked_mean
-)
+from .multiscale_fusion import *
 
 def convert_module_to_f16(l):
     """
@@ -69,14 +67,35 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, dino_cond=None, cond_kwargs=None):
+    def forward(self, x, emb, cond_kwargs=None, dino_cond=None):
         extra_output = None
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, (AttentionBlock, ObjectAwareCrossAttention)):
                 x, extra_output = layer(x, cond_kwargs)
-            elif isinstance(layer, DINOCrossAttention):
+            elif isinstance(layer, SpatialTransformer):
+                x = layer(x, dino_cond)
+            else:
+                x = layer(x)
+        return x, extra_output
+
+
+class TimestepEmbedSequential(nn.Sequential, TimestepBlock):      # for extracting resblock outputs
+    """
+    A sequential module that passes timestep embeddings to the children that
+    support it as an extra input.
+    """
+    def forward(self, x, emb, cond_kwargs=None, dino_cond=None, resblock_out_list=None):
+        extra_output = None
+        for layer in self:
+            if isinstance(layer, TimestepBlock):
+                x = layer(x, emb)
+                if resblock_out_list is not None and isinstance(layer, ResBlock):
+                    resblock_out_list.append(x)
+            elif isinstance(layer, (AttentionBlock, ObjectAwareCrossAttention)):
+                x, extra_output = layer(x, cond_kwargs)
+            elif isinstance(layer, SpatialTransformer):
                 x = layer(x, dino_cond)
             else:
                 x = layer(x)
@@ -690,300 +709,217 @@ class DINOContextAdapter(nn.Module):
         return g
 
 
-class DINOCrossAttention(nn.Module):
+class DINOBevAligner(nn.Module):
     """
-    한 번의 MHA에서 Self-Attn(BEV↔BEV) + Cross-Attn(BEV↔DINO)을 동시에 수행.
+    Self-contained BEV aligner for DINOv2 last_tokens using BEVFormer-style reference generation.
 
-    Q = BEV
-    K/V = concat([BEV(Self K/V with pos), DINO(Cross K/V with pos)], seq-dim)
+    Inputs:
+      - last_tokens: (B, V, N, C_dino)
+      - patch_hw:    (Hp, Wp) with Hp*Wp == N
+      - img_metas:   list of dicts (len=B), each with:
+          * 'lidar2img': (V, 4, 4)
+          * 'img_shape' : ((H, W, 3),) or similar; we use [0][0]=H, [0][1]=W
 
-    last_tokens: (B, V, Hp*Wp, C_dino)
-    patch_hw:    (Hp, Wp)
-    img_metas[b]: {'lidar2img': (V,4,4), 'img_shape': (H_img, W_img)}
+    Returns:
+      - bev_feat_ctx: (B, C_ctx, bev_h, bev_w)
     """
     def __init__(
         self,
-        channels,
-        num_heads=1,
-        num_head_channels=-1,  
-        dino_channels=768,
-        pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
-        pos_scale_self=1.0,     
-        pos_scale_dino=1.0,    
-        use_ffn=False,         # optional FFN
-        z_bins=8,               # Z
-        num_points_in_pillar=4  # S (한 BEV 셀당 z 샘플 수)
-        ):
-        super().__init__()
-        
-        self.channels = channels
-        if num_head_channels == -1:
-            assert channels % num_heads == 0, \
-                f"q,k,v channels {channels} is not divisible by num_heads {num_heads}"
-            self.num_heads = num_heads
-            self.d_k = channels // num_heads
-        else:
-            assert channels % num_head_channels == 0, \
-                f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
-            self.num_heads = channels // num_head_channels
-            self.d_k = num_head_channels
-
-        self.dino_channels = dino_channels
-        self.pc_range = pc_range
-        self.z_bins = int(z_bins)
-        self.num_points_in_pillar = int(num_points_in_pillar)
-
-        # ---- Q from BEV ----
-        self.norm_q = normalization(self.channels)
-        self.q_proj = conv_nd(1, self.channels, self.num_heads * self.d_k, kernel_size=1)
-
-        # ---- Self K/V from BEV (content + BEV pos) ----
-        self.self_pos_raw_dim = 2  # (x_norm, y_norm)
-        self.self_pos_dim = max(32, int(self.channels * pos_scale_self))
-        self.self_pos_mlp = nn.Sequential(
-                                conv_nd(1, self.self_pos_raw_dim, self.self_pos_dim, 1),
-                                nn.GELU(),
-                                conv_nd(1, self.self_pos_dim, self.self_pos_dim, 1),
-                            )
-        # concat([bev_content(C), bev_pos(self_pos_dim)]) -> project to heads*d_k
-        self.W_k_self = conv_nd(1, self.channels + self.self_pos_dim, self.num_heads * self.d_k, 1)
-        self.W_v_self = conv_nd(1, self.channels, self.num_heads * self.d_k, 1)
-
-        # ---- Cross K/V from DINO (content + DINO pos) ----
-        self.dino_pos_raw_dim = 4  # (u_norm, v_norm, view_ratio, depth_norm)
-        self.dino_pos_dim = max(32, int(self.channels * pos_scale_dino))
-        self.dino_pos_mlp = nn.Sequential(
-                                conv_nd(1, self.dino_pos_raw_dim, self.dino_pos_dim, 1),
-                                nn.GELU(),
-                                conv_nd(1, self.dino_pos_dim, self.dino_pos_dim, 1),
-                            )
-        # DINO content -> project to C (content embedding), then to heads*d_k
-        self.dino_content_to_c = conv_nd(1, self.dino_channels, self.channels, 1)
-        self.W_k_dino = conv_nd(1, self.channels + self.dino_pos_dim, self.num_heads * self.d_k, 1)
-        self.W_v_dino = conv_nd(1, self.channels, self.num_heads * self.d_k, 1)
-
-        # ---- Output projection (zero-init) ----
-        self.proj_out = zero_module(conv_nd(1, self.num_heads * self.d_k, self.channels, 1))
-
-        # ---- Optional FFN ----
-        if use_ffn:
-            self.ffn = nn.Sequential(
-                            conv_nd(1, self.channels, 4*self.channels, 1),
-                            nn.GELU(),
-                            conv_nd(1, 4*self.channels, self.channels, 1),
-                        )
-        else:
-            self.ffn = None
-
-        # ---- Learnable gate for DINO branch (stability) ----
-        self.dino_gate = nn.Parameter(torch.tensor(-2.0))  # sigmoid(-2) ≈ 0.12
-
-    @torch.no_grad()
-    def _sample_dino_tokens(
-        self,
-        last_tokens,      # (B,V,Hp*Wp,Cd)
-        patch_hw,
-        uv,               # (B,V,N,2) pixel
-        mask,             # (B,V,N) bool
-        img_hw,
+        bev_h=50,
+        bev_w=50,
+        cam_view=6,
+        pc_range = (-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
+        num_points_in_pillar=4,
+        input_size=518,             # DINO square resize S
+        c_dino=768,               # DINO feature dim
+        c_ctx=None,                  # output channels
+        post_ln_affine=True,       # recommended True (stability + capacity)
+        eps=1e-6,
+        device='cuda'
     ):
-        """ bilinear sampling on patch grid → (B,V,N,Cd) """
-        B, V, P, Cd = last_tokens.shape
-        Hp, Wp = patch_hw
-        # (B,V,Hp*Wp,Cd) -> (B,V,Cd,Hp,Wp)
-        feat = last_tokens.view(B, V, Hp, Wp, Cd).permute(0,1,4,2,3).contiguous()
-        grid = uv_to_patch_grid(uv, img_hw, patch_hw)                                # (B*V, N, 1, 2)
-        feat_bv = feat.view(B*V, Cd, Hp, Wp)
-        sampled = F.grid_sample(feat_bv, grid, mode="bilinear",
-                                align_corners=False, padding_mode="zeros")            # (B*V,Cd,N,1)
-        sampled = sampled.squeeze(-1).permute(0,2,1).contiguous()                     # (B*V,N,Cd)
-        return sampled.view(B, V, -1, Cd)                                             # (B,V,N,Cd)
-
-    def _make_z_samples(self, device, dtype):
-        z_min, z_max = self.pc_range[2], self.pc_range[5]
-        # [0,1] 정규화된 bin-center 샘플
-        zs_norm = torch.linspace(0.5, self.z_bins - 0.5, steps=self.num_points_in_pillar,device=device, dtype=dtype) / float(self.z_bins)    # (S,)
-        z_samples = z_min + zs_norm * (z_max - z_min)           
-        return z_samples
-    
-    
-    def forward(self, bev_feat, dino_cond):
-        '''
-        :param x: (N, C, H, W)
-        :param dino_cond: {'feature_type', 'features', 'patch_hw', 'last_cls', 'last_tokens', 'img_metas', 'geom'}
-        '''
-        last_tokens = dino_cond['last_tokens']
-        patch_hw = dino_cond['patch_hw']
-        img_metas = dino_cond['img_metas']
-        
-        B, C, H, W = bev_feat.shape
-        assert C == self.channels, "bev_feat channels must equal `channels` passed to the module."
-        assert last_tokens.shape[-1] == self.dino_channels, \
-            "last_tokens feature dim must equal `dino_channels`."
-    
-        device = bev_feat.device
-        L1 = H * W
-        
-        z_samples = self._make_z_samples(device=device, dtype=bev_feat.dtype)  # (S,)
-        S = z_samples.numel()
-        
-        Vcams = last_tokens.shape[1]
-        Cd = last_tokens.shape[-1]
-        Hp, Wp = patch_hw
-
-        # ----- BEV grid & normalized coords (for self pos) -----
-        bx, by = build_bev_xy_grid(B, H, W, self.pc_range, device)  # (B,H,W)
-        x_min, y_min, z_min, x_max, y_max, z_max = self.pc_range
-        x_norm = ((bx - x_min) / max(1e-6, (x_max - x_min))).clamp(0,1).view(B, 1, L1)  # (B,1,L1)
-        y_norm = ((by - y_min) / max(1e-6, (y_max - y_min))).clamp(0,1).view(B, 1, L1)  # (B,1,L1)
-
-        # ----- Q from BEV -----
-        x = bev_feat.view(B, C, L1)                         # (B,C,L1)
-        Q = self.q_proj(self.norm_q(x))                        # (B, H*d_k, L1)
-
-        # ----- Self K/V from BEV -----
-        self_pos_raw = torch.cat([x_norm, y_norm], dim=1)         # (B,2,L1)
-        self_pos = self.self_pos_mlp(self_pos_raw)                # (B,self_pos_dim,L1)
-        K_self_in = torch.cat([x, self_pos], dim=1)               # (B,C+self_pos_dim,L1)
-        K_self = self.W_k_self(K_self_in)                         # (B, H*d_k, L1)
-        V_self = self.W_v_self(x)                                 # (B, H*d_k, L1)
-
-        # ----- Cross DINO: align & aggregate to one token per BEV cell -----
-        # 3D points: (B,V,N=L1*S, 3)
-        bx1 = bx.view(B, L1); by1 = by.view(B, L1)
-        bz = z_samples.view(1,1,S).expand(B, L1, S).contiguous()
-        N = L1 * S
-        pts = torch.stack([bx1.unsqueeze(-1).expand(-1,-1,S),
-                           by1.unsqueeze(-1).expand(-1,-1,S),
-                           bz], dim=-1).view(B, 1, N, 3).expand(-1, Vcams, -1, -1).contiguous()
-
-        lidar2img = torch.stack(
-            [torch.as_tensor(m['lidar2img'], device=device, dtype=bev_feat.dtype) for m in img_metas],
-            dim=0
-        )  # (B,V,4,4)
-        H_img, W_img = img_metas[0]['img_shape'][0][:2]
-        img_hw = (H_img, W_img)
-        uv, mask, depth = project_lidar2img(pts, lidar2img, img_hw)                # (B,V,N,2),(B,V,N),(B,V,N)
-        sampled = self._sample_dino_tokens(last_tokens, patch_hw, uv, mask, img_hw) # (B,V,N,Cd)
-
-        # (view,z) 가중 평균 → (B,L1,Cd)
-        sampled = sampled.view(B, Vcams, L1, S, Cd)
-        mask_vz = mask.view(B, Vcams, L1, S)
-        dino_mean_vs = masked_mean(sampled, mask_vz.unsqueeze(-1), dim=1)                # (B,L1,S,Cd)
-        dino_mean    = masked_mean(dino_mean_vs, mask_vz.any(dim=1).unsqueeze(-1), dim=2) # (B,L1,Cd)
-
-        # DINO pos raw (u_norm, v_norm, view_ratio, depth_norm) per BEV cell
-        uv_ = uv.view(B, Vcams, L1, S, 2)
-        uv_mean_vs = masked_mean(uv_, mask_vz.unsqueeze(-1), dim=1)                      # (B,L1,S,2)
-        uv_mean    = masked_mean(uv_mean_vs, mask_vz.any(dim=1).unsqueeze(-1), dim=2)    # (B,L1,2)
-
-        visible_views = mask_vz.any(dim=3).float().sum(dim=1)                              # (B,L1)
-        view_ratio   = (visible_views / float(Vcams)).clamp(0, 1).view(B, 1, L1)
-
-        u_norm = (uv_mean[..., 0] / max(1, W_img - 1)).clamp(0,1).view(B, 1, L1)
-        v_norm = (uv_mean[..., 1] / max(1, H_img - 1)).clamp(0,1).view(B, 1, L1)
-        depth_mean = masked_mean(depth.view(B, Vcams, L1, S), mask_vz, dim=1)
-        depth_mean = masked_mean(depth_mean, mask_vz.any(dim=1), dim=2).view(B, 1, L1)
-        z_min = max(1e-6, self.pc_range[2]); z_max = max(z_min + 1e-3, self.pc_range[5])
-        d_norm = ((depth_mean - z_min) / (z_max - z_min)).clamp(0,1)                      # (B,1,L1)
-
-        # DINO content/pos -> heads*d_k
-        dino_c = self.dino_content_to_c(dino_mean.transpose(1,2).contiguous())            # (B,C,L1)
-        dino_pos_raw = torch.cat([u_norm, v_norm, view_ratio, d_norm], dim=1)             # (B,4,L1)
-        dino_pos = self.dino_pos_mlp(dino_pos_raw)                                        # (B,dino_pos_dim,L1)
-
-        K_dino = self.W_k_dino(torch.cat([dino_c, dino_pos], dim=1))                      # (B,H*d_k,L1)
-        V_dino = self.W_v_dino(dino_c)                                                    # (B,H*d_k,L1)
-
-        # ---- Mixed memory: concat on sequence dim ----
-        g = torch.sigmoid(self.dino_gate)                                                 # scalar in (0,1)
-        K_mix = torch.cat([K_self, K_dino], dim=2)                                        # (B,H*d_k, 2*L1)
-        V_mix = torch.cat([V_self, g * V_dino], dim=2)                                    # (B,H*d_k, 2*L1)
-
-        # ---- Multi-Head Attention (per-head) ----
-        B_, Hd = B, self.num_heads * self.d_k
-        Lq, Lk = L1, K_mix.shape[2]
-        Qh = Q.view(B_, self.num_heads, self.d_k, Lq).reshape(B_*self.num_heads, self.d_k, Lq)
-        Kh = K_mix.view(B_, self.num_heads, self.d_k, Lk).reshape(B_*self.num_heads, self.d_k, Lk)
-        Vh = V_mix.view(B_, self.num_heads, self.d_k, Lk).reshape(B_*self.num_heads, self.d_k, Lk)
-
-        # FP16-friendly scaling
-        scale = 1.0 / math.sqrt(math.sqrt(float(self.d_k)))
-        attn_logits = torch.einsum("bcl, bcs -> bls", Qh*scale, Kh*scale)                 # (B*H, Lq, Lk)
-        attn = F.softmax(attn_logits.float(), dim=-1).type_as(attn_logits)
-        out_h = torch.einsum("bls, bcs -> bcl", attn, Vh)                                 # (B*H, d_k, Lq)
-        out = out_h.view(B_, self.num_heads, self.d_k, Lq).reshape(B_, Hd, Lq)            # (B,H*d_k,L1)
-
-        out = self.proj_out(out)                                                          # (B,C,L1)
-        y = (x + out).view(B, C, H, W)                                                    # residual add
-
-        if self.ffn is not None:
-            y_ffn = self.ffn(y.view(B, C, L1)).view(B, C, H, W)
-            y = y + y_ffn
-
-        return y
-
-
-class MultiScaleConcat(nn.Module):
-    def __init__(self, in_chs=[256,512,1024,1024], out_dim=256, mid=256):
-        """
-        Hierarchical feature fusion by simple concatenation and conv
-        """
         super().__init__()
+        self.bev_h = bev_h
+        self.bev_w = bev_w
+        self.pc_range = pc_range
+        self.num_points_in_pillar = num_points_in_pillar
+        self.S = input_size
+        self.c_dino = c_dino
+        self.c_ctx = c_dino if c_ctx is None else c_ctx
+        self.eps = eps
 
-        self.out_layer = nn.Sequential(
-            nn.Conv2d(sum(in_chs), 2*mid, kernel_size=1, bias=False),
-            nn.GroupNorm(32, 2*mid),           
-            nn.SiLU(inplace=True),
+        # Norms are created lazily with correct feature dim
+        self.post_ln_affine = post_ln_affine
+        self.pre_ln  = None
+        self.post_ln = nn.LayerNorm(self.c_dino, elementwise_affine=self.post_ln_affine).to(device)
 
-            nn.Conv2d(2*mid, 2*mid, kernel_size=3, padding=1, groups=2*mid, bias=False),
-            nn.GroupNorm(32, 2*mid),
-            nn.SiLU(inplace=True),
+        # Per-view weights (initialized lazily with V)
+        self._w_view = nn.Parameter(th.zeros(1, cam_view, 1, device=device))
 
-            nn.Conv2d(2*mid, out_dim, kernel_size=1, bias=False),
-            nn.GroupNorm(16, out_dim),       
-        )
+        # (B,Q,C_dino) -> (B,Q,C_ctx)
+        # self.proj = nn.Linear(self.c_dino, self.c_ctx, bias=True)
+        self.proj = conv_nd(2, self.c_dino, self.c_ctx, 1)
 
-    def forward(self, xs):
-        x0, x1, x2, x3 = xs
-        B, _, H, W = x0.shape
-        B, _, H1, W1 = x1.shape
-                    
-        f1 = th.cat([x2, x3], dim=1)     # H//4, W//4
-        f2 = th.cat([x1, F.interpolate(f1, (H1, W1), mode='bilinear', align_corners=False)], dim=1)     # H//2, W//2
-        x = th.cat([x0, F.interpolate(f2, (H, W), mode='bilinear', align_corners=False)], dim=1)     # H, W  
-        return self.out_layer(x)           # [B,out_dim,H,W]
-    
-    
-class MultiScaleConcatV2(nn.Module):
-    def __init__(self, in_chs=[256,512,1024], out_dim=256, mid=256):
+    # ---------- BEVFormer-style reference generation ----------
+    @staticmethod
+    def _get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim='3d', bs=1, device='cuda', dtype=th.float32):
+        if dim == '3d':
+            zs = th.linspace(0.5, Z - 0.5, num_points_in_pillar, dtype=dtype, device=device).view(-1, 1, 1).expand(num_points_in_pillar, H, W) / Z
+            xs = th.linspace(0.5, W - 0.5, W, dtype=dtype, device=device).view(1, 1, W).expand(num_points_in_pillar, H, W) / W
+            ys = th.linspace(0.5, H - 0.5, H, dtype=dtype, device=device).view(1, H, 1).expand(num_points_in_pillar, H, W) / H
+            ref_3d = th.stack((xs, ys, zs), -1)                 # (D,H,W,3)
+            ref_3d = ref_3d.permute(0, 3, 1, 2).flatten(2).permute(0, 2, 1)  # (D, H*W, 3)
+            ref_3d = ref_3d[None].repeat(bs, 1, 1, 1)              # (bs, D, H*W, 3)
+            return ref_3d
+        elif dim == '2d':
+            ref_y, ref_x = th.meshgrid(
+                th.linspace(0.5, H - 0.5, H, dtype=dtype, device=device),
+                th.linspace(0.5, W - 0.5, W, dtype=dtype, device=device),
+                indexing='ij'
+            )
+            ref_y = ref_y.reshape(-1)[None] / H
+            ref_x = ref_x.reshape(-1)[None] / W
+            ref_2d = th.stack((ref_x, ref_y), -1)
+            ref_2d = ref_2d.repeat(bs, 1, 1).unsqueeze(2)          # (bs, H*W, 1, 2)
+            return ref_2d
+        else:
+            raise ValueError("dim must be '3d' or '2d'")
+
+    @force_fp32(apply_to=('reference_points', 'img_metas'))
+    def point_sampling(self, reference_points, img_metas):
+        allow_tf32 = th.backends.cuda.matmul.allow_tf32
+        allow_tf32_cudnn  = th.backends.cudnn.allow_tf32
+        th.backends.cuda.matmul.allow_tf32 = False
+        th.backends.cudnn.allow_tf32 = False
+
+        # (B, N, 4, 4)
+        lidar2img = np.asarray([m['lidar2img'] for m in img_metas])
+        lidar2img = reference_points.new_tensor(lidar2img)
+
+        pc_range = self.pc_range
+        ref = reference_points.clone()
+        ref[..., 0:1] = ref[..., 0:1] * (pc_range[3] - pc_range[0]) + pc_range[0]
+        ref[..., 1:2] = ref[..., 1:2] * (pc_range[4] - pc_range[1]) + pc_range[1]
+        ref[..., 2:3] = ref[..., 2:3] * (pc_range[5] - pc_range[2]) + pc_range[2]
+        ref = th.cat((ref, th.ones_like(ref[..., :1])), -1)            # (bs, D, Q, 4)
+
+        ref = ref.permute(1, 0, 2, 3)                                  # (D, B, Q, 4)
+        D, B, Q = ref.size()[:3]
+        num_cam = lidar2img.size(1)
+
+        ref = ref.view(D, B, 1, Q, 4).repeat(1, 1, num_cam, 1, 1).unsqueeze(-1)  # (D,B,N,Q,4,1)
+        lidar2img = lidar2img.view(1, B, num_cam, 1, 4, 4).repeat(D, 1, 1, Q, 1, 1)
+
+        cam = th.matmul(lidar2img.to(th.float32), ref.to(th.float32)).squeeze(-1)  # (D,B,N,Q,4)
+        eps = 1e-5
+        depth = cam[..., 2:3]
+        bev_mask = (depth > eps)                                                   # (D,B,N,Q,1)
+
+        uv = cam[..., 0:2] / th.maximum(depth, th.ones_like(depth) * eps)          # (D,B,N,Q,2)
+
+        # (V,B,Q,D,2), (V,B,Q,D)
+        uv = uv.permute(2, 1, 3, 0, 4).contiguous()           
+        bev_mask = bev_mask.permute(2, 1, 3, 0, 4).squeeze(-1).contiguous()       
+
+        th.backends.cuda.matmul.allow_tf32 = allow_tf32
+        th.backends.cudnn.allow_tf32 = allow_tf32_cudnn
+        return uv, bev_mask
+
+    def _tokens_to_fmap(self, last_tokens, Hp, Wp):
+        B, V, N, C = last_tokens.shape
+        fmap = last_tokens.view(B, V, Hp, Wp, C).permute(0,1,4,2,3).contiguous()  # (B,V,C,Hp,Wp)
+        if self.pre_ln is not None:
+            t = fmap.permute(0,1,3,4,2).reshape(-1, C)  # (B*V*Hp*Wp, C)
+            t = self.pre_ln(t)
+            fmap = t.view(B, V, Hp, Wp, C).permute(0,1,4,2,3).contiguous()
+        return fmap
+
+    def forward(self, last_tokens, patch_hw, img_metas, dino_geom):
         """
-        Hierarchical feature fusion by simple concatenation and conv 
-        (without mid-block)
+        last_tokens: (B,V,N,C_dino)
+        patch_hw:    (Hp,Wp)
+        img_metas:   list length B (BEVFormer-like metas)
+        returns:     (B, C_ctx, bev_h, bev_w)
         """
-        super().__init__()
+        assert last_tokens.ndim == 4
+        B, V, N, C_dino = last_tokens.shape
+        Hp, Wp = patch_hw
+        assert Hp * Wp == N, f"patch_hw {patch_hw} mismatches N={N}"
+        device = last_tokens.device
+        patch_size = dino_geom.get('patch_size', None)
 
-        self.out_layer = nn.Sequential(
-            nn.Conv2d(sum(in_chs), 2*mid, kernel_size=1, bias=False),
-            nn.GroupNorm(32, 2*mid),           
-            nn.SiLU(inplace=True),
+        # (1) DINO fmap
+        fmap = self._tokens_to_fmap(last_tokens, Hp, Wp)  # (B, V, C_dino, Hp, Wp)
 
-            nn.Conv2d(2*mid, 2*mid, kernel_size=3, padding=1, groups=2*mid, bias=False),
-            nn.GroupNorm(32, 2*mid),
-            nn.SiLU(inplace=True),
+        # (2) BEV refs and camera projection
+        Z_bins = int(round((self.pc_range[5] - self.pc_range[2]) ))  # same spirit as BEVFormer
+        ref_3d = self._get_reference_points(self.bev_h, self.bev_w, Z=Z_bins,
+                                            num_points_in_pillar=self.num_points_in_pillar,
+                                            dim='3d', bs=B, device=device, dtype=fmap.dtype)
+        
+        uv, bev_mask = self.point_sampling(ref_3d, img_metas)  # (V, B, Q, D, 2), (V,B,Q,D)
 
-            nn.Conv2d(2*mid, out_dim, kernel_size=1, bias=False),
-            nn.GroupNorm(16, out_dim),       
-        )
+        # (3) uv coords -> patch grid coords
+        Q = self.bev_h * self.bev_w
+        scale = dino_geom['scale']
+        pad_top, pad_left = dino_geom['padding'][0], dino_geom['padding'][1]
+        H2, W2 = dino_geom['H2W2'][0], dino_geom['H2W2'][1]
+    
+        u = uv[..., 0]  # (V,B,Q,D)
+        v = uv[..., 1]  # (V,B,Q,D)
 
-    def forward(self, xs):
-        x0, x1, x2 = xs
-        B, _, H, W = x0.shape
-        B, _, H1, W1 = x1.shape
-                    
-        f1 = th.cat([x1, F.interpolate(x2, (H1, W1), mode='bilinear', align_corners=False)], dim=1)     # H//2, W//2
-        f2 = th.cat([x0, F.interpolate(f1, (H, W), mode='bilinear', align_corners=False)], dim=1)     # H, W  
-        return self.out_layer(f2)           # [B,out_dim,H,W]
+        # DINO input pixel coords
+        u_d = u * scale + pad_left   #(V,B,Q,D)
+        v_d = v * scale + pad_top
+
+        valid_in = (u_d >= 0) & (u_d <= (W2 - 1)) & (v_d >= 0) & (v_d <= (H2 - 1))
+        mask_bv = bev_mask & valid_in  # (V,B,Q,D
+
+        # normalization
+        u_p = u_d / patch_size  
+        v_p = v_d / patch_size  
+        gx = 2.0 * (u_p / (W2 - 1.0)) - 1.0  # (V,B,Q,D)
+        gy = 2.0 * (v_p / (H2 - 1.0)) - 1.0
+        grid = th.stack([gx, gy], dim=-1)  # (V,B,Q,D,2)
+
+        # (4) bilinear sampling
+        fmap_v = fmap.view(B*V, C_dino, Hp, Wp)
+        grid_v = grid.permute(1,0,2,3,4).contiguous().view(B*V, Q*self.num_points_in_pillar, 1, 2)
+        # sampled = F.grid_sample(fmap_v, grid_v, mode='bilinear',
+        #                         padding_mode='zeros', align_corners=True)  # (B*V,C,Q*D,1)
+        sampled = F.grid_sample(fmap_v, grid_v, mode='bilinear',
+                                padding_mode='border', align_corners=False)  # (B*V,C,Q*D,1)
+        sampled = sampled.squeeze(-1).permute(0,2,1).contiguous().view(B, V, Q, self.num_points_in_pillar, C_dino)
+
+        # (5) post-norm
+        t = sampled.view(-1, C_dino)
+        t = self.post_ln(t)
+        sampled = t.view(B, V, Q, self.num_points_in_pillar, C_dino)
+
+        # (6) pillar mean + view-weighted mean
+        mask = mask_bv.to(device).permute(1,0,2,3).unsqueeze(-1).float()  # (B,V,Q,D,1)
+        sampled = sampled * mask
+        denom_D = mask.sum(dim=3, keepdim=True).clamp_min(self.eps)        # (B,V,Q,1,1)
+        feat_v = sampled.sum(dim=3, keepdim=True) / denom_D                # (B,V,Q,1,C)
+        feat_v = feat_v.squeeze(3)                                         # (B,V,Q,C)
+        
+        # view-weighted mean
+        w = F.softplus(self._w_view).expand(B, -1, -1)                         
+        w = w.unsqueeze(-1)                                                # (B, V, 1, 1)    
+        view_valid = (denom_D.squeeze(3) > 0).float()                                     
+        num = (feat_v * w).sum(dim=1)                                      # (B,Q,C)
+        den = (w * view_valid).sum(dim=1).clamp_min(self.eps)              # (B,Q,1)
+        bev_dino_feat = num / den                                                  # (B,Q,C_dino)
+
+        # # (7) channel reduction (B,Q,C_dino) -> (B,Q,C_ctx)
+        # bev_qc = self.proj(f_bev)                                       # (B,Q,C_ctx)
+        # # reshape to (B,C_ctx,H,W)
+        # bev_feat_ctx = bev_qc.permute(0,2,1).contiguous().view(B, self.c_ctx, self.bev_h, self.bev_w)
+        # return bev_feat_ctx
+        
+        # reshape to (B,C_ctx,H,W)
+        bev_dino_feat = bev_dino_feat.permute(0,2,1).contiguous().view(B, self.c_dino, self.bev_h, self.bev_w)
+        return self.proj(bev_dino_feat)                                     # (B,Q,C_ctx)
+    
 
 
 
@@ -1036,6 +972,7 @@ class LayoutDiffusionUNetModel(nn.Module):
             attention_ds,
             encoder_channels=None,
             dino_dim=768,
+            context_dim=256, 
             dropout=0,
             channel_mult=(1, 2, 4, 8),
             conv_resample=True,
@@ -1048,7 +985,7 @@ class LayoutDiffusionUNetModel(nn.Module):
             use_scale_shift_norm=False,
             resblock_updown=False,
             use_positional_embedding_for_attention=False,
-            use_spatial_transformer=False,
+            use_spatial_transformer=True,
             image_size=256,
             attention_block_type='GLIDE',
             num_attention_blocks=1,
@@ -1063,6 +1000,15 @@ class LayoutDiffusionUNetModel(nn.Module):
             legacy=True,
     ):
         super().__init__()
+
+        if use_spatial_transformer:
+            assert context_dim is not None, 'Fool!! You forgot to include the dimension of your cross-attention conditioning...'
+
+        if context_dim is not None:
+            assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your cross-attention conditioning...'
+            from omegaconf.listconfig import ListConfig
+            if type(context_dim) == ListConfig:
+                context_dim = list(context_dim)
 
         self.norm_for_obj_embedding = norm_for_obj_embedding
         self.channels_scale_for_positional_embedding = channels_scale_for_positional_embedding
@@ -1121,15 +1067,21 @@ class LayoutDiffusionUNetModel(nn.Module):
 
         # DINO feature condition
         # self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, pool='mean')
-        # self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=1024, num_views=6)
-
-        self.multi_concat = MultiScaleConcat(in_chs=(model_channels, model_channels*2, model_channels*4, model_channels*4), 
+        self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, num_views=6)
+        
+        self.aligner = DINOBevAligner(c_dino=dino_dim, c_ctx=context_dim)
+        
+        
+        if self.return_multiscale:
+            # self.multi_concat = MultiScaleConcatWeighted(in_chs=(model_channels, model_channels*2, model_channels*4, model_channels*4), 
+            #                                     out_dim=out_channels, 
+            #                                     mid=model_channels)
+            self.multi_concat = MultiScaleWeightedSum(in_chs=(model_channels, model_channels, model_channels, model_channels*2), 
                                                     out_dim=out_channels, 
                                                     mid=model_channels)
-        # self.multi_concat = MultiScaleConcatV2(in_chs=(model_channels, model_channels*2, model_channels*4), 
-        #                                        out_dim=out_channels, 
-        #                                        mid=model_channels)
 
+ 
+        
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
             [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
@@ -1182,18 +1134,8 @@ class LayoutDiffusionUNetModel(nn.Module):
                             )
                         elif ds == 4:
                             layers.append(
-                                DINOCrossAttention(
-                                    ch, 
-                                    num_heads=num_heads,
-                                    num_head_channels=num_head_channels,
-                                    dino_channels=dino_dim,
-                                    pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
-                                    pos_scale_self=1.0,     
-                                    pos_scale_dino=1.0,
-                                    use_ffn=False,
-                                    z_bins=8,              
-                                    num_points_in_pillar=4  
-                                )
+                                SpatialTransformer(
+                                    ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim)
                             )
                 # self.input_blocks.append(TimestepEmbedSequential(*layers))
                 block = TimestepEmbedSequential(*layers)
@@ -1245,26 +1187,9 @@ class LayoutDiffusionUNetModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
             ),
-            DINOCrossAttention(
-                ch, 
-                num_heads=num_heads,
-                num_head_channels=num_head_channels,
-                dino_channels=dino_dim,
-                pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
-                pos_scale_self=1.0,     
-                pos_scale_dino=1.0,
-                use_ffn=False,
-                z_bins=8,              
-                num_points_in_pillar=4  
-            ),
-            # ResBlock(
-            #     ch,
-            #     time_embed_dim,
-            #     dropout,
-            #     dims=dims,
-            #     use_checkpoint=use_checkpoint,
-            #     use_scale_shift_norm=use_scale_shift_norm,
-            # ),
+            SpatialTransformer(
+                ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
+            ),                             
             attention_block_fn(
                 ch,
                 use_checkpoint=use_checkpoint,
@@ -1339,19 +1264,11 @@ class LayoutDiffusionUNetModel(nn.Module):
                             )
                         elif ds == 4:
                             layers.append(
-                                DINOCrossAttention(
-                                    ch, 
-                                    num_heads=num_heads,
-                                    num_head_channels=num_head_channels,
-                                    dino_channels=dino_dim,
-                                    pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
-                                    pos_scale_self=1.0,     
-                                    pos_scale_dino=1.0,
-                                    use_ffn=False,
-                                    z_bins=8,              
-                                    num_points_in_pillar=4  
+                                SpatialTransformer(
+                                    ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
                                 )
                             )
+                      
                 if level and i == num_res_blocks:
                     out_ch = ch
                     layers.append(
@@ -1411,48 +1328,55 @@ class LayoutDiffusionUNetModel(nn.Module):
         # dino_cond_proj = self.adapter(dino_cond['last_cls'], cam_ids=cam_ids)
 
         emb = emb + xf_proj.to(emb) # emb: (B, 1024)
-        
         # emb = emb + xf_proj.to(emb)+ dino_cond_proj.to(emb)  # emb: (B, 1024)
+
+        bev_ctx = self.aligner(dino_cond['last_tokens'], patch_hw=dino_cond['patch_hw'], 
+                               img_metas=dino_cond['img_metas'], dino_geom=dino_cond['geom'])   # (B,256,50,50)
+        tokens_by_ds = {}
+        for ds_key in self.attention_ds[::-1]:
+            target_hw = int(self.image_size // ds_key)  # 50//1=50, 50//2=25, 50//4=12
+            tokens_by_ds[ds_key] = self._ctx_tokens_from_bev(bev_ctx, target_hw)  # (B, target_hw*target_hw, 256)
         
-        out_list = []
         h = x.type(self.dtype)  # h: (B, C, H, W)
         for module in self.downsample_blocks:
             h = module(h) 
-
+            
+        # Encoder
         for module in self.input_blocks:
-            h, extra_output = module(h, emb, dino_cond, layout_outputs) 
-            # h, extra_output = module(h, emb, layout_outputs) 
+            dino_tokens = self._select_ctx(tokens_by_ds, module)
+            h, extra_output = module(h, emb, layout_outputs, dino_tokens) 
             if extra_output is not None:
                 extra_outputs.append(extra_output)
             hs.append(h)
 
-        h, extra_output = self.middle_block(h, emb, dino_cond, layout_outputs) 
-        # h, extra_output = self.middle_block(h, emb, layout_outputs)
+        # Middle block
+        dino_tokens_mid = self._select_ctx(tokens_by_ds, self.middle_block)
+        h, extra_output = self.middle_block(h, emb, layout_outputs, dino_tokens_mid)
         if extra_output is not None:
             extra_outputs.append(extra_output)
-        out_list = []
-        out_list.append(h)
-
+ 
+        inter_feats = []
+        # Decoder
         for i_out, module in enumerate(self.output_blocks):
             h = th.cat([h, hs.pop()], dim=1)
-            h, extra_output = module(h, emb, dino_cond, layout_outputs) 
-            # h, extra_output = module(h, emb, layout_outputs)
+            h, extra_output = module(h, emb, layout_outputs, dino_tokens)
             if extra_output is not None:
                 extra_outputs.append(extra_output)
-            if self.return_multiscale and i_out in [1, 4]:
-                out_list.append(h)
+            if i_out in [4, 6, 7, 8]:
+                inter_feats.append(h)
             
         h = h.type(x.dtype)
-        h = self.out(h)
-        out_list.append(h)
+        final = self.out(h)
+ 
         for module in self.upsample_blocks:
             h = module(h)
 
         if self.return_multiscale:
-            multi_feat = self.multi_concat(out_list[::-1]) 
-            return h, multi_feat, out_list
+            multi_feat = self.multi_concat(inter_feats[::-1]) 
+            return final, multi_feat, inter_feats
         else:
-            return [h, extra_outputs]
+            return final, inter_feats
+    
     
     def save_pretrained(self, save_directory):
         if os.path.isfile(save_directory):
@@ -1484,3 +1408,23 @@ class LayoutDiffusionUNetModel(nn.Module):
             print('not successfully load the entire model, try to load part of model')
             self.load_state_dict(state_dict, strict=False)
 
+
+    def _ctx_tokens_from_bev(self, bev_ctx: th.Tensor, size_hw: int):
+        """
+        bev_ctx: (B, 256, H, W)
+        size_hw: (int) 50, 25, 12
+        return:  (B, size_hw*size_hw, 256) -> self.dtype
+        """
+        if bev_ctx.shape[-1] != size_hw or bev_ctx.shape[-2] != size_hw:
+            bev_ctx_s = F.adaptive_avg_pool2d(bev_ctx, (size_hw, size_hw))
+        else:
+            bev_ctx_s = bev_ctx
+        return bev_ctx_s.flatten(2).transpose(1, 2).contiguous().to(self.dtype)
+
+
+    def _select_ctx(self, tokens_by_ds: dict, module: nn.Module):
+        ds = getattr(module, "ctx_ds", 1)
+        if ds in tokens_by_ds:
+            return tokens_by_ds[ds]
+        nearest = min(tokens_by_ds.keys(), key=lambda k: abs(k - ds))
+        return tokens_by_ds[nearest]

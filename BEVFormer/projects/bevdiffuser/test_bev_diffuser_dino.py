@@ -132,6 +132,12 @@ def parse_args():
         help='The number of diffusion steps to run the unet.')
     
     parser.add_argument(
+        '--inversion', 
+        type=bool, 
+        default=False, 
+        help='Use inversion process for diffusion sampling.')
+
+    parser.add_argument(
         '--eval',
         type=str,
         nargs='+',
@@ -209,7 +215,8 @@ def test():
              noise_timesteps=args.noise_timesteps,
              denoise_timesteps=args.denoise_timesteps,
              num_inference_steps=args.num_inference_steps,
-             use_classifier_guidence=args.use_classifier_guidence)
+             use_classifier_guidence=args.use_classifier_guidence,
+             inversion=args.inversion)
 
 
 def evaluate(unet,
@@ -224,7 +231,8 @@ def evaluate(unet,
              noise_timesteps=0,
              denoise_timesteps=0,
              num_inference_steps=0,
-             use_classifier_guidence=False):
+             use_classifier_guidence=False,
+             inversion=False):
     
     def get_classifier_gradient(x, **kwargs):
         x_ = x.detach().requires_grad_(True)
@@ -297,6 +305,7 @@ def evaluate(unet,
             uncond['last_tokens'] = last_tokens_u
             return uncond
         
+        
         if noise_timesteps > 0:
             if noise_timesteps > 1000:
                 latents = torch.randn_like(latents)
@@ -304,14 +313,13 @@ def evaluate(unet,
             else:   
                 noise = torch.randn_like(latents)
                 noise_timesteps = torch.tensor(noise_timesteps).long()   
-                latents = noise_scheduler.add_noise(latents, noise, noise_timesteps)
+                latents = noise_scheduler.add_noise(latents, noise, noise_timesteps) # noisy input
         
         if denoise_timesteps > 0:        
+            # # DDIM
             cond, uncond = get_condition(batch, use_cond=True), get_condition(batch, use_cond=False)
             dino_cond = get_dino(img, img_metas)
             dino_uncond = get_dino_uncond(dino_cond)
-            
-            # # DDIM
             noise_scheduler.config.num_train_timesteps=denoise_timesteps
             noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
         
@@ -321,12 +329,7 @@ def evaluate(unet,
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-                
-            # get detection results
-            latents = latents.permute(0, 2, 3, 1)            
-            latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-            det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
-            
+
         else:
             # extract multi-scale features
             cond = get_condition(batch, use_cond=True)
@@ -335,17 +338,16 @@ def evaluate(unet,
             # multi_feat = unet(latents, t_test, dino_cond, **cond)[1] 
             latents = unet(latents, t_test, dino_cond, **cond)[0] 
             
-            # get detection results
-            latents = latents.permute(0, 2, 3, 1)            
-            latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-            det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
-            
             # # get detection results
             # multi_feat = multi_feat.permute(0, 2, 3, 1)            
             # multi_feat = multi_feat.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
             # det_result = bev_model(return_loss=False, only_bev=False, given_bev=multi_feat, rescale=True, **batch)
-
-
+        
+        # get detection results
+        latents = latents.permute(0, 2, 3, 1)            
+        latents = latents.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
+        det_result = bev_model(return_loss=False, only_bev=False, given_bev=latents, rescale=True, **batch)
+            
         if isinstance(det_result, dict):
             if 'bbox_results' in det_result.keys():
                 bbox_result = det_result['bbox_results']

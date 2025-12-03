@@ -51,18 +51,49 @@ num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
 
+# unet = dict(
+#     # type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
+#     type='projects.bevdiffuser.layout_diffusion.diffusion_unet_v3.DiffusionUNetModel',
+#     parameters=dict(
+#         image_size=bev_h_,
+#         use_fp16=False,
+#         use_scale_shift_norm=True,
+#         in_channels=_dim_,
+#         out_channels=_dim_,
+#         model_channels=256,
+#         context_dim=256,
+#         dino_dim=768,
+#         # encoder_channels=256, # assert same as layout_encoder.hidden_dim
+#         num_head_channels=32,
+#         num_heads=-1,
+#         num_heads_upsample=-1,
+#         num_res_blocks=2,
+#         num_attention_blocks=1,
+#         resblock_updown=True,
+#         use_spatial_transformer=True,
+#         num_pre_downsample=0,
+#         attention_resolutions=[ 4, 2, 1 ],
+#         channel_mult=[ 1, 2, 4 ],
+#         dropout=0.0,
+#         use_checkpoint=False,
+#         # use_positional_embedding_for_attention=True,
+#         # attention_block_type='ObjectAwareCrossAttention',
+#         return_multiscale=False)
+# )
+
 unet = dict(
-    # type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
-    type='projects.bevdiffuser.layout_diffusion.diffusion_unet.UNetModel',
+    # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
+    type='layout_diffusion.diffusion_unet_v3.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
         use_scale_shift_norm=True,
+        return_multiscale=True,
         in_channels=_dim_,
         out_channels=_dim_,
         model_channels=256,
-        context_dim=768,
-        # encoder_channels=256, # assert same as layout_encoder.hidden_dim
+        context_dim=256,  # 768 (original DINOv2)
+        encoder_channels=256, # assert same as layout_encoder.hidden_dim
         num_head_channels=32,
         num_heads=-1,
         num_heads_upsample=-1,
@@ -71,14 +102,14 @@ unet = dict(
         resblock_updown=True,
         use_spatial_transformer=True,
         num_pre_downsample=0,
-        attention_resolutions=[ 4, 2, 1 ],
+        attention_ds=[ 4, 2, 1 ],
         channel_mult=[ 1, 2, 4 ],
         dropout=0.0,
         use_checkpoint=False,
-        # use_positional_embedding_for_attention=True,
-        # attention_block_type='ObjectAwareCrossAttention',
-        return_multiscale=True,)
+        use_positional_embedding_for_attention=True)
 )
+
+
 
 model = dict(
     type='BEVFormer',
@@ -204,8 +235,8 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-data_root = '../../data/nuscenes/'
-# data_root = 'BEVFormer/data/nuscenes/'
+# data_root = '../../data/nuscenes/'
+data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 

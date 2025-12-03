@@ -463,23 +463,23 @@ def evaluate(unet,
             figsize=(30, 5), dpi=300, show=False
         )
         
-        # render_sixcams_lidar_bev(
-        #     pre_bchw=original_bev,          # ← pre-UNet
-        #     f1_bchw=f1, f2_bchw=f2, f3_bchw=f3, f4_bchw=f4,  # 중간/출력들
-        #     concat_bchw=multi_feat,       # ← multi-scale concat
-        #     b=0,
-        #     nusc=nusc, sample_token=sample_token,
-        #     out_dir=f"{save_path}/visualize/unet_intermediates_img_v2",
-        #     title=f"step {step} | UNet features",
-        #     mode="energy", agg="l1", whiten=True,
-        #     smooth_sigma=0.8,
-        #     joint_clip=(2,98), gamma=1.0,
-        #     bev_cmap="viridis", bev_interp="bilinear",
-        #     bev_extent=extent, bev_origin="lower",
-        #     lidar_axes_limit=50.0,
-        #     cam_image_paths=cam_paths,
-        #     figsize=(26, 10), dpi=300, show=False
-        # )
+        render_sixcams_lidar_bev(
+            pre_bchw=original_bev,          # ← pre-UNet
+            f1_bchw=f1, f2_bchw=f2, f3_bchw=f3, f4_bchw=f4,  # 중간/출력들
+            concat_bchw=multi_feat,       # ← multi-scale concat
+            b=0,
+            nusc=nusc, sample_token=sample_token,
+            out_dir=f"{save_path}/visualize/unet_intermediates_img_v2",
+            title=f"step {step} | UNet features",
+            mode="energy", agg="l1", whiten=True,
+            smooth_sigma=0.8,
+            joint_clip=(2,98), gamma=1.0,
+            bev_cmap="viridis", bev_interp="bilinear",
+            bev_extent=extent, bev_origin="lower",
+            lidar_axes_limit=50.0,
+            cam_image_paths=cam_paths,
+            figsize=(26, 10), dpi=300, show=False
+        )
         
         #------- original feature & all inter features & concat feature -------
         # inter_list = output_feats

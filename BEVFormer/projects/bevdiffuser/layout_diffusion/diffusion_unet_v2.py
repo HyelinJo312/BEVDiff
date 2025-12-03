@@ -64,12 +64,14 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None):
+    def forward(self, x, emb, dino_cond=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
-                x = layer(x, context) ## suraj: error happening in kitti at this line
+                x = layer(x, dino_cond) ## suraj: error happening in kitti at this line
+            elif isinstance(layer, DINOCrossAttention):
+                x = layer(x, dino_cond) ## suraj: error happening in kitti at this line
             else:
                 x = layer(x)
         return x
@@ -405,61 +407,152 @@ class QKVAttention(nn.Module):
     def count_flops(model, _x, y):
         return count_flops_attn(model, _x, y)
 
+def get_2d_sincos_pos_embed(embed_dim, H, W):
+    """
+    2D sine/cosine positional embedding.
+    Returns: (1, embed_dim, H, W)
+    """
+    device = th.device("cpu")
+    grid_h = th.arange(H, device=device)
+    grid_w = th.arange(W, device=device)
+    grid = th.meshgrid(grid_h, grid_w, indexing="ij")  # (2, H, W)
+    grid = th.stack(grid, dim=0).float()  # (2, H, W)  (y, x)
+
+    assert embed_dim % 2 == 0, "embed_dim must be divisible by 2"
+    pos_dim = embed_dim // 2
+    assert pos_dim % 2 == 0, "embed_dim//2 must be divisible by 2"
+
+    omega = th.arange(pos_dim // 2, dtype=th.float32, device=device)
+    omega = 1.0 / (10000 ** (omega / (pos_dim / 2)))
+
+    h_embed = grid[0].reshape(-1).unsqueeze(1) * omega.unsqueeze(0)  # (H*W, pos_dim/2)
+    w_embed = grid[1].reshape(-1).unsqueeze(1) * omega.unsqueeze(0)  # (H*W, pos_dim/2)
+
+    pos_embed_h = th.cat([h_embed.sin(), h_embed.cos()], dim=1)  # (H*W, pos_dim)
+    pos_embed_w = th.cat([w_embed.sin(), w_embed.cos()], dim=1)  # (H*W, pos_dim)
+
+    pos_embed = th.cat([pos_embed_h, pos_embed_w], dim=1)  # (H*W, embed_dim)
+    pos_embed = pos_embed.T.reshape(1, embed_dim, H, W)       # (1, C, H, W)
+    return pos_embed
+
+class DINOCrossAttention(nn.Module):
+    """
+    Cross-attention between BEV feature map and DINOv2 tokens.
+
+    - x: (B, C, H, W)           # BEV feature
+    - dino_cond['dino_tokens']: (B, V, N, C_dino) or (B, L2, C_dino)
+
+    Query  : BEV patches
+    Key/Val: [BEV patches, DINO tokens]
+    """
+
+    def __init__(
+        self,
+        channels,                  # BEV feature channels (C)
+        dino_channels,             # DINO token channels (C_dino)
+        num_heads=1,
+        num_head_channels=-1,
+        use_checkpoint=False,
+        return_attention_embeddings=False,
+        use_key_padding_mask=False,
+        norm_first=False,
+        ):
+        super().__init__()
+        
+        self.channels = channels
+        self.dino_channels = dino_channels
+        self.use_checkpoint = use_checkpoint
+        self.return_attention_embeddings = return_attention_embeddings
+        self.use_key_padding_mask = use_key_padding_mask
+        self.norm_first = norm_first
+
+        if num_head_channels == -1:
+            self.num_heads = num_heads
+        else:
+            assert channels % num_head_channels == 0, \
+                f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
+            self.num_heads = channels // num_head_channels
+            
+        # BEV qkv projector
+        self.norm_for_qkv = normalization(channels)
+        self.qkv_projector = conv_nd(1, channels, 3 * channels, 1)  # (B, C, L1) -> (B, 3C, L1)
+
+        # DINO tokens projector
+        self.norm_for_dino = normalization(dino_channels)
+        self.dino_kv_projector = conv_nd(1, dino_channels, 2 * channels, 1)
+
+        self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
 
-# class DINOContextAdapter(nn.Module):
-#     """
-#     Adapt DINOv2 global context (CLS tokens) to UNet time-embedding size.
-#     Input:
-#       - context: (B, V, C_in) 
-#     Output:
-#       - context_proj: (B, C_emb)
-#     """
-#     def __init__(self, c_in: int, c_emb: int,
-#                  pool: str = 'mean',
-#                  dropout: float = 0.0,
-#                  ln_first: bool = True,
-#                  ln_after: bool = True):
-#         super().__init__()
-#         assert pool in ['mean', 'max']
-#         self.pool = pool
+    def forward(self, x, dino_cond):
+        """
+        x: (B, C, H, W)
+        dino_cond['last_tokens']:
+            - (B, V, N, C_dino)  or
+            - (B, L2, C_dino)
+        dino_cond.get('key_padding_mask', None):
+            - (B, L2) bool, True = pad (optional)
+        """
+        extra_output = None
 
-#         self.ln_first = nn.LayerNorm(c_in) if ln_first else None
+        B, C, H, W = x.shape
+        L1 = H * W  # BEV patch 수
+        
+        # -------- 1. Add BEV Positional Embedding --------
+        bev_pos_emb = get_2d_sincos_pos_embed(C, H, W).to(x.device, x.dtype)
+        x = x + bev_pos_emb  
+        
+        # -------- 2. Flatten BEV and compute Q/K/V --------
+        x_flat = x.reshape(B, C, -1)          # (B, C, L1)
+        qkv = self.qkv_projector(self.norm_for_qkv(x_flat))  # (B, 3C, L1)
+        q, k_img, v_img = qkv.split(C, dim=1)  # (B, C, L1)
 
-#         # lightweight projection head to emb dim
-#         self.proj = nn.Sequential(
-#             nn.Linear(c_in, c_emb),
-#             nn.GELU(),
-#             nn.Linear(c_emb, c_emb),
-#         )
-#         self.ln_after = nn.LayerNorm(c_emb) if ln_after else None
+        # Multi-head reshape
+        q = q.reshape(B * self.num_heads, C // self.num_heads, L1)      # (B*H, C_h, L1)
+        k_img = k_img.reshape(B * self.num_heads, C // self.num_heads, L1)
+        v_img = v_img.reshape(B * self.num_heads, C // self.num_heads, L1)
 
-#     def forward(self, context, mask=None):
-#         """
-#         context: (B, V, C_in) or (B, C_in)
-#         mask:    optional (B, V) boolean; False = ignore that view
-#         returns: (B, C_emb)
-#         """
-#         if context.ndim == 2:
-#             # (B, C_in) -> add V=1
-#             context = context.unsqueeze(1)  # (B, 1, C_in)
-#         elif context.ndim != 3:
-#             raise ValueError(f"context must be (B,C) or (B,V,C), got {context.shape}")
+        # -------- 3. Process DINO tokens --------
+        dino_tokens = dino_cond["last_tokens"]  # (B, V, N, C_dino) or (B, L2, C_dino)
 
-#         B, V, C = context.shape
+        if dino_tokens.dim() == 4:
+            # (B, V, N, C_dino) -> (B, L2, C_dino) -> (B, C_dino, L2)
+            B_d, V, N, C_d = dino_tokens.shape
+            assert B_d == B, "Batch size mismatch between x and dino_tokens"
+            L2 = V * N
+            dino_tokens = dino_tokens.reshape(B, V * N, C_d).permute(0, 2, 1)  # (B, C_dino, L2)
+        else:
+            raise ValueError("dino_tokens must be (B, V, N, C_dino) or (B, L2, C_dino)")
 
-#         x = context     # (B, V, C_in)
-#         if self.ln_first is not None:
-#             x = self.ln_first(x)  # LN over C
-#         if self.pool == 'mean':
-#             g = x.mean(dim=1)     # (B, C)
-#         elif self.pool == 'max':
-#             g, _ = x.max(dim=1)   # (B, C)
+        dino_tokens = self.norm_for_dino(dino_tokens)           # (B, C_dino, L2)
+        dino_kv = self.dino_kv_projector(dino_tokens)           # (B, 2C, L2)
+        k_dino, v_dino = dino_kv.split(C, dim=1)                # 두 개 다 (B, C, L2)
 
-#         g = self.proj(g)          # (B, C_emb)
-#         if self.ln_after is not None:
-#             g = self.ln_after(g)
-#         return g
+        k_dino = k_dino.reshape(B * self.num_heads, C // self.num_heads, L2)  # (B*H, C_h, L2)
+        v_dino = v_dino.reshape(B * self.num_heads, C // self.num_heads, L2)
+
+        # -------- 4. Concatenate image patch & DINO for K/V --------
+        k_mix = th.cat([k_img, k_dino], dim=2)  # (B*H, C_h, L1 + L2)
+        v_mix = th.cat([v_img, v_dino], dim=2)  # (B*H, C_h, L1 + L2)
+
+        # -------- 5. Attention --------
+        # scaled dot-product attention : (q · k_mix) / sqrt(C_h)
+        C_h = (C // self.num_heads)
+        scale = 1.0 / math.sqrt(C_h)
+        
+        attn_scores = th.einsum("bct,bcs->bts", q * scale, k_mix * scale)  # (B*H, L1, L1+L2)
+        attn_weights = th.softmax(attn_scores.float(), dim=-1).type(attn_scores.dtype)  # (B*H, L1, L1+L2)
+
+        # output = attention * v_mix
+        attn_output = th.einsum("bts,bcs->bct", attn_weights, v_mix)  # (B*H, C_h, L1)
+        attn_output = attn_output.reshape(B, C, L1)                   # (B, C, L1)
+
+        # -------- 5. output projection + residual --------
+        h = self.proj_out(attn_output)           # (B, C, L1)
+        out = (x_flat + h).reshape(B, C, H, W)   # (B, C, H, W)
+
+        return out
+
     
 class DINOContextAdapter(nn.Module):
     def __init__(self, 
@@ -874,7 +967,7 @@ class UNetModel(nn.Module):
                                                 out_dim=out_channels, 
                                                 mid=model_channels)
 
-
+        in_channels = in_channels * 2
         self.downsample_blocks = nn.ModuleList([])
         self.upsample_blocks = nn.ModuleList([])
         for _ in range(num_pre_downsample):
@@ -895,9 +988,6 @@ class UNetModel(nn.Module):
             [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
         )
         self.input_blocks[0].ctx_ds = 1
-        # self._feature_size = model_channels
-        # input_block_chans = [model_channels]
-        # ch = model_channels
         self._feature_size = ch
         input_block_chans = [ch]
         ds = 1
@@ -925,15 +1015,27 @@ class UNetModel(nn.Module):
                     if legacy:
                         #num_heads = 1
                         dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
+                    # layers.append(
+                    #     AttentionBlock(
+                    #         ch,
+                    #         use_checkpoint=use_checkpoint,
+                    #         num_heads=num_heads,
+                    #         num_head_channels=dim_head,
+                    #         use_new_attention_order=use_new_attention_order,
+                    #     ) if not use_spatial_transformer else SpatialTransformer(
+                    #         ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
+                    #     )
+                    # )
                     layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads,
-                            num_head_channels=dim_head,
-                            use_new_attention_order=use_new_attention_order,
-                        ) if not use_spatial_transformer else SpatialTransformer(
-                            ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
+                        DINOCrossAttention(
+                                    ch,                # BEV feature channels (C)
+                                    dino_dim,          # DINO token channels (C_dino)
+                                    num_heads=num_heads,
+                                    num_head_channels=num_head_channels,
+                                    use_checkpoint=False,
+                                    return_attention_embeddings=False,
+                                    use_key_padding_mask=False,
+                                    norm_first=False,
                         )
                     )
                 block = TimestepEmbedSequential(*layers)
@@ -976,15 +1078,26 @@ class UNetModel(nn.Module):
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
             ),
-            AttentionBlock(
-                ch,
-                use_checkpoint=use_checkpoint,
-                num_heads=num_heads,
-                num_head_channels=dim_head,
-                use_new_attention_order=use_new_attention_order,
-            ) if not use_spatial_transformer else SpatialTransformer(
-                            ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
-                        ),
+            # AttentionBlock(
+            #     ch,
+            #     use_checkpoint=use_checkpoint,
+            #     num_heads=num_heads,
+            #     num_head_channels=dim_head,
+            #     use_new_attention_order=use_new_attention_order,
+            # ) if not use_spatial_transformer else SpatialTransformer(
+            #                 ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
+            #             ),
+        
+            DINOCrossAttention(
+                        ch,                # BEV feature channels (C)
+                        dino_dim,          # DINO token channels (C_dino)
+                        num_heads=num_heads,
+                        num_head_channels=num_head_channels,
+                        use_checkpoint=False,
+                        return_attention_embeddings=False,
+                        use_key_padding_mask=False,
+                        norm_first=False,
+            ),
             ResBlock(
                 ch,
                 time_embed_dim,
@@ -1023,15 +1136,27 @@ class UNetModel(nn.Module):
                     if legacy:
                         #num_heads = 1
                         dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
+                    # layers.append(
+                    #     AttentionBlock(
+                    #         ch,
+                    #         use_checkpoint=use_checkpoint,
+                    #         num_heads=num_heads_upsample,
+                    #         num_head_channels=dim_head,
+                    #         use_new_attention_order=use_new_attention_order,
+                    #     ) if not use_spatial_transformer else SpatialTransformer(
+                    #         ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
+                    #     )
+                    # )
                     layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads_upsample,
-                            num_head_channels=dim_head,
-                            use_new_attention_order=use_new_attention_order,
-                        ) if not use_spatial_transformer else SpatialTransformer(
-                            ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
+                        DINOCrossAttention(
+                            ch,              
+                            dino_dim,          
+                            num_heads=num_heads,
+                            num_head_channels=num_head_channels,
+                            use_checkpoint=False,
+                            return_attention_embeddings=False,
+                            use_key_padding_mask=False,
+                            norm_first=False,
                         )
                     )
                 if level and i == num_res_blocks:
@@ -1104,34 +1229,33 @@ class UNetModel(nn.Module):
         bev_ctx = self.aligner(dino_cond['last_tokens'], patch_hw=dino_cond['patch_hw'], 
                                     img_metas=dino_cond['img_metas'], dino_geom=dino_cond['geom'])   # (B,256,50,50)
         
-        tokens_by_ds = {}
-        for ds_key in self.attention_resolutions[::-1]:
-            target_hw = int(self.image_size // ds_key)  # 50//1=50, 50//2=25, 50//4=12
-            tokens_by_ds[ds_key] = self._ctx_tokens_from_bev(bev_ctx, target_hw)  # (B, target_hw*target_hw, 256)
+        # Input: BEV feature + DINO features
+        input = th.cat([x, bev_ctx], dim=1)  # (B, C+C_ctx, H, W)
         
-        h = x.type(self.dtype)
+        # h = x.type(self.dtype)
+        h = input.type(self.dtype)  # h: (B, C+C_ctx, H, W)
         for module in self.downsample_blocks:
             h = module(h)
 
+        # Encoder
         for module in self.input_blocks:
-            dino_tokens = self._select_ctx(tokens_by_ds, module)
-            # import pdb; pdb.set_trace()
-            h = module(h, emb, dino_tokens)  ## suraj: error happening inside kitti at this line
+            h = module(h, emb, dino_cond)  ## suraj: error happening inside kitti at this line
             hs.append(h)
-
-        dino_tokens_mid = self._select_ctx(tokens_by_ds, self.middle_block)
-        h = self.middle_block(h, emb, dino_tokens_mid)  # 50//4=12
+            
+        # Middle block
+        h = self.middle_block(h, emb, dino_cond)  # 50//4=12
         out_list = []
 
+        # Decoder
         for i_out, module in enumerate(self.output_blocks):
             h = th.cat([h, hs.pop()], dim=1)
-            dino_tokens = self._select_ctx(tokens_by_ds, module)
-            h = module(h, emb, dino_tokens)
+            h = module(h, emb, dino_cond)
             if self.return_multiscale and i_out in [1, 4]:
                 out_list.append(h)
 
         h = h.type(x.dtype)
         h = self.out(h)
+        
         # out_list.append(h)   # h of the real last layer of UNet
         for module in self.upsample_blocks:
             h = module(h)  

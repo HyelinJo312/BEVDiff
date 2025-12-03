@@ -524,7 +524,6 @@ def render_unet_intermediates_three(
     return out
 
 
-
 def _safe_imread_rgb(path):
     if (path is None) or (not os.path.exists(path)):
         raise FileNotFoundError(f"Not found: {path}")
