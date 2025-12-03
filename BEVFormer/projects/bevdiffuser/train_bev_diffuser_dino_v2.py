@@ -58,7 +58,7 @@ from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from test_bev_diffuser_dino_v2 import evaluate
 from torch.utils.tensorboard import SummaryWriter
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond, GetDINOv2
+from projects.bevdiffuser.fm_feature import GetDINOv2Cond, GetDINOv2, GetDINOv2CondV2
 from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
 from projects.bevdiffuser.load_depth import LoadDepth
 
@@ -155,7 +155,7 @@ def train():
         unet.upsample_blocks.requires_grad_(True)
         
     # Get DINOv2 feature extractor
-    get_dino = GetDINOv2()
+    get_dino = GetDINOv2CondV2()
     get_depth = LoadDepth()
     
 

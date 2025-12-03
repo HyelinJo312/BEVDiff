@@ -281,10 +281,10 @@ class GetDINOv2CondV2(nn.Module):
 
         return {
             'feature_type': 'dinov2',
-            'features': feats_out,          # list[(B,V,N,C)]
-            'patch_hw': (Hp, Wp),           # (H2/14, W2/14)
+            # 'features': feats_out,          # list[(B,V,N,C)]
+            'patch_hw': (Hp, Wp),           # (H2/14, W2/14) (35, 58)
             'last_cls': last_cls,           # (B, V, C)
-            'last_tokens': last_tok,        # (B, V, N, C)
+            'last_tokens': last_tok,        # (B, V, N, C) 
             'img_metas': img_metas,
             'geom': extra_geom              
         }
