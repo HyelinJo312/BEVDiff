@@ -7,5 +7,42 @@
             "envManager": "ms-python.python:conda",
             "packageManager": "ms-python.python:conda"
         }
-    ]
+    ],
+    "python.analysis.exclude": [
+        "**/data",
+        "**/results*",
+        "**/build",
+        "**/mmdetection3d"
+    ],
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/.hg/store/**": true,
+        "**/build/**": true,
+        "**/data/**": true,
+        "**/outputs/**": true,
+        "**/vis/**": true,
+        "**/work_dirs/**": true,
+        "**/mmdet3d/**": true,
+        "**/mmdetection3d/**": true,
+        "**/results/**": true,
+        "**/assets/**": true,
+        "**/depth_map/**": true,
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/bower_components": true,
+        "**/*.code-search": true,
+        "**/build/**": true,
+        "**/data/**": true,
+        "**/outputs/**": true,
+        "**/vis/**": true,
+        "**/work_dirs/**": true,
+        "**/mmdet3d/**": true,
+        "**/mmdetection3d/**": true,
+        "**/results/**": true,
+        "**/assets/**": true,
+        "**/depth_map/**": true,
+    },
+
 }

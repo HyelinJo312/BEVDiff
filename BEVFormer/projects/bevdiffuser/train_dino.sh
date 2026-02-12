@@ -5,7 +5,7 @@
 GPUS=4
 PORT=${PORT:-29501}
 
-BEV_CONFIG="../configs/bevdiffuser/dino_tiny.py"
+BEV_CONFIG="../configs/bevdiffuser/layout_tiny_dino.py"
 BEV_CHECKPOINT="../../ckpts/bevformer_tiny_epoch_24.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
 PRETRAINED_UNET_CHECKPOINT=None

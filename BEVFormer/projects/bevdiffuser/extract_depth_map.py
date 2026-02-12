@@ -45,7 +45,7 @@ from mmdet.apis import set_random_seed
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond, GetDPTDepth, GetDPTDepthV2
+from projects.bevdiffuser.fm_feature import GetDINOv2Cond, GetDPTDepthV2, GetDPTDepthV3
 from projects.bevdiffuser.visualize.bev_visualize_multi_scale import *
 
 logger = get_logger(__name__, log_level="INFO")
@@ -99,7 +99,7 @@ def test():
     if args.launcher != 'none':
         init_dist(args.launcher, **bev_cfg.dist_params)
 
-    get_depth = GetDPTDepthV2()
+    get_depth = GetDPTDepthV3()
     
     # bev_cfg.data.test.test_mode = True
     # bev_cfg.data.test.load_annos = True
@@ -120,13 +120,15 @@ def test():
     )
 
     
-    save_path = os.path.join('../../data/nuscenes/depth')
+    # save_path = os.path.join('../../data/nuscenes/depth')
+    save_path = os.path.join('/mnt/hdd/data/Hyelin/nuscenes')
 
     rank, world_size = get_dist_info()
     if rank == 0:
         prog_bar = mmcv.ProgressBar(len(dataset))
     time.sleep(2)  # This line can prevent deadlock problem in some cases.
     
+    out_size = (490, 812)
     for step, batch in enumerate(dataloader):
         img = batch['img'].data[0]       # (B, len_queue, V, C, H, W)
         len_queue = img.size(1)
@@ -144,7 +146,7 @@ def test():
 
         raw_imgs = torch.stack(all_raw_imgs, dim=0)         # (B, V, C, H, W)
 
-        get_depth(raw_imgs, curr_img_metas, save_dir=save_path)
+        get_depth(raw_imgs, curr_img_metas, save_dir=save_path, out_size=out_size)
 
         if rank == 0:
             prog_bar.update(B*world_size)

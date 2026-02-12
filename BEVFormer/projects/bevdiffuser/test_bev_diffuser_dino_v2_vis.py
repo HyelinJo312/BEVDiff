@@ -391,39 +391,39 @@ def evaluate(unet,
         # )
         
         #--------- version 2 (DINOV2 style): visualize only 1 feature ---------
-        # fig, axes, pca, stats = visualize_single_bev_pca_and_lidar(
-        #     bev_bchw=multi_feat,              # (B,C,H,W)
-        #     b=0,
-        #     nusc=nusc,
-        #     sample_token=sample_token,
-        #     bev_extent=extent,
-        #     out_dir=f"{save_path}/visualize/rgb_pca_inter/rgb_pca_bicubic_multi-concat",
-        #     title=f"step {step} | BEV feature multi-concat (PCA)",
-        #     show=False,
-        #     pca_whiten=False,
-        #     pca_clip=(2, 98),
-        #     pca_gamma=1.2
-        #     )
+        fig, axes, pca, stats = visualize_single_bev_pca_and_lidar(
+            bev_bchw=multi_feat,              # (B,C,H,W)
+            b=0,
+            nusc=nusc,
+            sample_token=sample_token,
+            bev_extent=extent,
+            out_dir=f"{save_path}/visualize/rgb_pca_inter/rgb_pca_bicubic_multi-concat",
+            title=f"step {step} | BEV feature multi-concat (PCA)",
+            show=False,
+            pca_whiten=False,
+            pca_clip=(2, 98),
+            pca_gamma=1.2
+            )
         
         
      
         ## ----------------------------- Activation Map ----------------------------- ##
         
-        # render_bev_triplet(
-        #     original_bev, denoised_bev, b=0,
-        #     nusc=nusc, sample_token=sample_token,
-        #     out_dir=f"{save_path}/visualize/pca_bev_signed",
-        #     title=f"step {step} | BEV feature",
-        #     labels=("original", "denoised", "LiDAR Top View"),
-        #     agg="l1", whiten=True, smooth_sigma=0.8,
-        #     joint_clip=None, gamma=1.0,   # joint_clip=(1,99)
-        #     bev_cmap="bwr", bev_interp="bilinear",
-        #     bev_extent=extent,           
-        #     bev_origin="lower",          
-        #     lidar_axes_limit=50.0,
-        #     figsize=(15,5), dpi=300, show=False,
-        #     signed=True, signed_clip_pct=98.0
-        # )
+        render_bev_triplet(
+            original_bev, denoised_bev, b=0,
+            nusc=nusc, sample_token=sample_token,
+            out_dir=f"{save_path}/visualize/pca_bev_signed",
+            title=f"step {step} | BEV feature",
+            labels=("original", "denoised", "LiDAR Top View"),
+            agg="l1", whiten=True, smooth_sigma=0.8,
+            joint_clip=None, gamma=1.0,   # joint_clip=(1,99)
+            bev_cmap="bwr", bev_interp="bilinear",
+            bev_extent=extent,           
+            bev_origin="lower",          
+            lidar_axes_limit=50.0,
+            figsize=(15,5), dpi=300, show=False,
+            signed=True, signed_clip_pct=98.0
+        )
         
         #------- only four multi-scale features --------
         # f1, f2, f3, f4 = output_feats1[2], output_feats2[2], output_feats3[2], output_feats4[2] 

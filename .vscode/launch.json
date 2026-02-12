@@ -9,12 +9,12 @@
             "request": "launch",
             //"module": "torch.distributed.launch",
             //"justMyCode": true,
-            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_dino_v2.py",
+            "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_dino.py",
             // "program": "${workspaceFolder}/BEVFormer/projects/bevdiffuser/train_bev_diffuser_original.py",
             "console": "integratedTerminal",
             "args": [
         
-                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/dino_tiny.py",
+                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_dino.py",
                 // "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny.py", 
                 "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--pretrained_unet_checkpoint", "None",
@@ -34,7 +34,6 @@
                 "--prediction_type", "sample",
                 "--task_loss_scale", "0.1",
                 "--launcher", "none",
-                "--depth_save_dir", "${workspaceFolder}/BEVFormer/projects/depth_map"
                 // "--task_loss_switch_step", "None"
                 // "--freeze_bev_model"
                 // "--report_to", "none"
@@ -70,7 +69,6 @@
                 "--noise_timesteps", "5",
                 "--denoise_timesteps", "5", 
                 "--num_inference_steps", "5",
-                "--inversion","True"
                 
             ],
 

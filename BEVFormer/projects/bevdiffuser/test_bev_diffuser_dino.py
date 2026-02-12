@@ -341,7 +341,7 @@ def evaluate(unet,
             # # get detection results
             # multi_feat = multi_feat.permute(0, 2, 3, 1)            
             # multi_feat = multi_feat.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-            # det_result = bev_model(return_loss=False, only_bev=False, given_bev=multi_feat, rescale=True, **batch)
+            # det_resu  lt = bev_model(return_loss=False, only_bev=False, given_bev=multi_feat, rescale=True, **batch)
         
         # get detection results
         latents = latents.permute(0, 2, 3, 1)            

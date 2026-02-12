@@ -155,7 +155,7 @@ def train():
         unet.upsample_blocks.requires_grad_(True)
         
     # Get DINOv2 feature extractor
-    get_dino = GetDINOv2CondV2()
+    get_dino = GetDINOv2Cond()
     get_depth = LoadDepth()
     
 
@@ -309,6 +309,7 @@ def train():
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num dataloader = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Num update steps per epoch = {num_update_steps_per_epoch}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
@@ -359,9 +360,6 @@ def train():
                 img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
                 dino_out = get_dino(img, img_metas)
                 dino_cond = get_dino_cond(dino_out)
-                
-                depth = get_depth(img_metas)
-                print(depth.shape)
                 
                 # Get BEV
                 with torch.no_grad():

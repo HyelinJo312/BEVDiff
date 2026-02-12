@@ -159,13 +159,13 @@ class GetDINOv2Cond(nn.Module):
             cls_out.append(cls_tok)
 
         last_tok, last_cls = feats_out[-1], cls_out[-1]
-
+        
         return {
             'feature_type': 'dinov2',
             'features': feats_out,          # list[(B,V,N,C),(B,V,C)]
             'patch_hw': (Hp, Wp),
-            'last_cls': last_cls,           # (B, V, C)
-            'last_tokens': last_tok,        # (B, V, N, C)
+            'last_cls': last_cls,           # (B, V, C) 
+            'last_tokens': last_tok,        # (B, V, N, C) 37 * 62
             'img_metas': img_metas,
             'geom': extra_geom
         }
@@ -281,10 +281,10 @@ class GetDINOv2CondV2(nn.Module):
 
         return {
             'feature_type': 'dinov2',
-            # 'features': feats_out,          # list[(B,V,N,C)]
+            'features': feats_out,          # list[(B,V,N,C)]
             'patch_hw': (Hp, Wp),           # (H2/14, W2/14) (35, 58)
             'last_cls': last_cls,           # (B, V, C)
-            'last_tokens': last_tok,        # (B, V, N, C) 
+            'last_tokens': last_tok,        # (B, V, N, C) N=35*58=2030
             'img_metas': img_metas,
             'geom': extra_geom              
         }
@@ -506,23 +506,20 @@ class GetDPTDepth(nn.Module):
                     color_png_path = os.path.join(cam_dir, depth_name + "_color.png")
                     save_colored_depth_cv2(depth_map, color_png_path, gamma=0.5)
 
-
 class GetDPTDepthV2(nn.Module):
+    '''
+    Extract depth from raw image (1600x900)
+    '''
     def __init__(self, device: str = "cuda"):
         super().__init__()
         self.device = device
 
         # DPT-DINOv2 small (KITTI) depth model
-        self.model = DPTForDepthEstimation.from_pretrained(
-            "facebook/dpt-dinov2-small-kitti"
-        ).to(self.device)
+        self.model = DPTForDepthEstimation.from_pretrained("facebook/dpt-dinov2-small-kitti").to(self.device)
         self.model.requires_grad_(False)
         self.model.eval()
 
-        # 해당 모델용 image processor (resize + normalization 등)
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            "facebook/dpt-dinov2-small-kitti"
-        )
+        self.image_processor = AutoImageProcessor.from_pretrained("facebook/dpt-dinov2-small-kitti")
 
     @torch.no_grad()
     def forward(self, images: torch.Tensor, img_metas, save_dir=None):
@@ -642,14 +639,15 @@ class GetDPTDepthV2(nn.Module):
                     cam_dir = os.path.join(save_dir, cam_name)
                     os.makedirs(cam_dir, exist_ok=True)
 
-                    npy_path = os.path.join(cam_dir, depth_name + ".npy")
-                    np.save(npy_path, depth_map.numpy().astype(np.float32))
+                    npz_path = os.path.join(cam_dir, depth_name + ".npz")
+                    # np.save(npy_path, depth_map.numpy().astype(np.float32))
+                    np.savez_compressed(npz_path, depth=depth_map.numpy().astype(np.float32))
 
                     color_png_path = os.path.join(cam_dir, depth_name + "_color.png")
                     save_colored_depth_cv2(depth_map, color_png_path, gamma=0.5)
 
         return depth_out_cpu  # (B, V, H_img, W_img)
-
+    
 
 def save_colored_depth_cv2(depth_map: torch.Tensor, save_path: str, gamma=0.5):
     d = depth_map.clone().cpu().numpy()
@@ -661,6 +659,150 @@ def save_colored_depth_cv2(depth_map: torch.Tensor, save_path: str, gamma=0.5):
     d_8bit = (d * 255.0).astype(np.uint8)
     colored = cv2.applyColorMap(d_8bit, cv2.COLORMAP_INFERNO)
     cv2.imwrite(save_path, colored)
+
+
+import os
+import cv2
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from transformers import DPTForDepthEstimation, AutoImageProcessor
+
+
+class GetDPTDepthV3(nn.Module):
+    """
+    img_metas의 filename을 통해 Raw image를 로드하고,
+    DPT(DINOv2)로 depth를 추출한 뒤,
+    사용자가 지정한 해상도(out_size)로 바로 resize해서 반환/저장하는 버전.
+
+    - 입력 images: BEVDepth/BEVFormer 등에서 쓰는 (B, V, C, H_img, W_img) 텐서
+      (여기서는 주로 B, V, H_img, W_img만 확인 용도로 사용)
+    - img_metas: 적어도 'filename' 리스트는 포함되어 있어야 함.
+    - out_size: (H_out, W_out). None이면 images의 (H_img, W_img)를 사용.
+    """
+    def __init__(self, device: str = "cuda"):
+        super().__init__()
+        self.device = device
+
+        # DPT-DINOv2 small (KITTI) depth model
+        self.model = DPTForDepthEstimation.from_pretrained(
+            "facebook/dpt-dinov2-small-kitti"
+        ).to(self.device)
+        self.model.requires_grad_(False)
+        self.model.eval()
+
+        self.image_processor = AutoImageProcessor.from_pretrained(
+            "facebook/dpt-dinov2-small-kitti"
+        )
+
+    @torch.no_grad()
+    def forward(self, images, img_metas, save_dir=None, out_size=None):
+        """
+        images: (B, V, C, H_img, W_img) or (V, C, H_img, W_img) when B=1
+        img_metas: list of dict, 각 dict 안에 'filename' 필수 (list of str)
+
+        out_size: (H_out, W_out)
+            - None이면 images의 (H_img, W_img)로 depth를 resize
+        """
+        if not isinstance(images, torch.Tensor):
+            raise TypeError("images must be a torch.Tensor")
+        if img_metas is None:
+            raise ValueError("img_metas is required to load raw images.")
+
+        # ---- 1) batch / view 차원 파악 ----
+        if images.ndim == 5:
+            B, V, C, H_img, W_img = images.shape
+        elif images.ndim == 4:
+            V, C, H_img, W_img = images.shape
+            B = 1
+        else:
+            raise ValueError(f"Unexpected tensor shape: {images.shape}")
+
+        # 출력 해상도 설정
+        if out_size is None:
+            H_out, W_out = H_img, W_img
+        else:
+            H_out, W_out = out_size
+
+        # ---- 2) img_metas에서 raw image 로딩 ----
+        raw_images = []  # length = B * V
+
+        for b in range(B):
+            meta = img_metas[b]
+            filenames = meta.get("filename", None)
+
+            if isinstance(filenames, (str, os.PathLike)):
+                filenames = [filenames]
+
+            if filenames is None:
+                raise ValueError("img_metas must contain 'filename' for raw loading.")
+
+            assert len(filenames) == V, \
+                f"Expected {V} filenames, got {len(filenames)} at batch {b}."
+
+            for v in range(V):
+                img_path = filenames[v]
+                img_bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
+                if img_bgr is None:
+                    raise FileNotFoundError(f"Failed to read image: {img_path}")
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                raw_images.append(img_rgb)
+
+        # ---- 3) DPT 전처리 & forward ----
+        inputs = self.image_processor(images=raw_images, return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(self.device)  # (B*V, 3, H_d, W_d)
+
+        outputs = self.model(pixel_values=pixel_values)
+        predicted_depth = outputs.predicted_depth  # (B*V, H_d, W_d)
+
+        # ---- 4) depth를 원하는 해상도 (H_out, W_out)으로 resize ----
+        depth_resized = F.interpolate(
+            predicted_depth.unsqueeze(1),  # (B*V, 1, H_d, W_d)
+            size=(H_out, W_out),
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze(1)  # (B*V, H_out, W_out)
+
+        depth_out = depth_resized.view(B, V, H_out, W_out)  # (B, V, H_out, W_out)
+        depth_out_cpu = depth_out.cpu()
+
+        # ---- 5) 저장 (npz + 컬러 PNG) ----
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+
+            for b in range(B):
+                meta = img_metas[b]
+                filenames = meta.get("filename", None)
+                if isinstance(filenames, (str, os.PathLike)):
+                    filenames = [filenames]
+
+                for v in range(V):
+                    depth_map = depth_out_cpu[b, v]  # (H_out, W_out)
+
+                    if filenames is not None:
+                        img_path = filenames[v]
+                        base_name = os.path.basename(img_path)          # xxx.jpg
+                        name_wo_ext = os.path.splitext(base_name)[0]    # xxx
+                        cam_name = os.path.basename(os.path.dirname(img_path))  # CAM_FRONT 등
+                        depth_name = f"{name_wo_ext}_dpt_depth"
+                    else:
+                        cam_name = "UNKNOWN_CAM"
+                        depth_name = f"sample{b}_view{v}_dpt_depth"
+
+                    cam_dir = os.path.join(save_dir, cam_name)
+                    os.makedirs(cam_dir, exist_ok=True)
+                    
+                    npz_path = os.path.join(cam_dir, depth_name + ".npz")
+                    np.savez_compressed(npz_path, depth=depth_map.numpy().astype(np.float32))
+
+                    # color_png_path = os.path.join(cam_dir, depth_name + "_color.png")
+                    # save_colored_depth_cv2(depth_map, color_png_path, gamma=0.5)
+
+        return depth_out_cpu  # (B, V, H_out, W_out)
+
+
+
 
 class GetCLIPCond(nn.Module):
     """
