@@ -148,3 +148,81 @@ class DDIMGuidedScheduler(DDIMScheduler):
             return (prev_sample,)
 
         return DDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
+
+
+
+    def step_inversion(
+        self,
+        model_output: torch.Tensor,
+        timestep: int,
+        sample: torch.Tensor,
+        eta: float = 0.0,
+        use_clipped_model_output: bool = False,
+        return_dict: bool = True,
+        classifier_gradient=None,
+    ) -> Union[DDIMSchedulerOutput, Tuple]:
+        """
+        DDIM inversion step: x_t  ->  x_{t+Δ}  (clean → noisy)
+        """
+
+        if self.num_inference_steps is None:
+            raise ValueError(
+                "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
+            )
+
+        # 1. next step value (= t + Δ)  ---------
+        delta = self.config.num_train_timesteps // self.num_inference_steps
+        next_timestep = timestep + delta
+
+        if next_timestep > self.config.num_train_timesteps - 1:
+            next_timestep = self.config.num_train_timesteps - 1
+
+        alpha_prod_t = self.alphas_cumprod[timestep]           # α_t
+        alpha_prod_t_next = self.alphas_cumprod[next_timestep] # α_{t+Δ}
+        beta_prod_t = 1 - alpha_prod_t
+
+        # 3. pred_original_sample (x0_hat) & pred_epsilon ----
+        if self.config.prediction_type == "epsilon":
+            # model_output = eps_theta
+            pred_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
+            pred_epsilon = model_output
+        elif self.config.prediction_type == "sample":
+            # model_output = x0_hat
+            pred_original_sample = model_output
+            pred_epsilon = (sample - alpha_prod_t ** 0.5 * pred_original_sample) / beta_prod_t ** 0.5
+        elif self.config.prediction_type == "v_prediction":
+            pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
+            pred_epsilon = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample` or `v_prediction`"
+            )
+
+        # classifier guidance 
+        if classifier_gradient is not None:
+            pred_epsilon = pred_epsilon - beta_prod_t ** 0.5 * classifier_gradient
+            pred_original_sample = (sample - beta_prod_t ** 0.5 * pred_epsilon) / alpha_prod_t ** 0.5
+
+        if self.config.thresholding:
+            pred_original_sample = self._threshold_sample(pred_original_sample)
+        elif self.config.clip_sample:
+            pred_original_sample = pred_original_sample.clamp(
+                -self.config.clip_sample_range, self.config.clip_sample_range
+            )
+
+        # 5. DDIM inversion: x_{t+Δ} (eta=0) -----
+        # DDIM forward/inversion:
+        #   x_{t+1} = sqrt(α_{t+1}) * x0_hat + sqrt(1-α_{t+1}) * eps_theta
+        std_dev_t = 0.0  # inversion -> deterministic chain
+
+        if use_clipped_model_output:
+            pred_epsilon = (sample - alpha_prod_t ** 0.5 * pred_original_sample) / beta_prod_t ** 0.5
+            
+        pred_sample_direction = (1 - alpha_prod_t_next - std_dev_t**2) ** 0.5 * pred_epsilon
+
+        next_sample = alpha_prod_t_next ** 0.5 * pred_original_sample + pred_sample_direction
+
+        if not return_dict:
+            return (next_sample,)
+
+        return DDIMSchedulerOutput(prev_sample=next_sample, pred_original_sample=pred_original_sample)

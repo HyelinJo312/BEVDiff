@@ -54,7 +54,7 @@ from mmdet.apis import set_random_seed
 
 from layout_diffusion.layout_dino_diffusion_unet_v2 import LayoutDiffusionUNetModel
 from scheduler_utils import DDIMGuidedScheduler
-from model_utils import get_bev_model, build_unet
+from model_utils import get_bev_model, build_unet, instantiate_from_config
 from test_bev_diffuser_dino import evaluate
 from torch.utils.tensorboard import SummaryWriter
 from projects.bevdiffuser.fm_feature import GetDINOv2Cond
@@ -415,7 +415,7 @@ def train():
                 
                 # Predict the noise residual and compute loss
                 # model_pred, multi_feat, _ = unet(noisy_latents, timesteps, dino_cond, **cond)
-                model_pred = unet(noisy_latents, timesteps, dino_cond, **cond)
+                model_pred = unet(noisy_latents, timesteps, dino_cond, **cond)[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -423,6 +423,16 @@ def train():
                     task_loss = get_task_loss(model_pred, **batch)
                 else:
                     task_loss = 0
+                    
+                # if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
+                #     # Switch when global_step >= args.task_loss_switch_step.
+                #     if args.task_loss_switch_step is not None and global_step >= args.task_loss_switch_step:
+                #         if multi_feat is not None:
+                #             task_loss = get_task_loss(multi_feat, **batch)
+                #         else:
+                #             task_loss = get_task_loss(model_pred, **batch)
+                # else:
+                #     task_loss = 0
                     
                 total_loss = denoise_loss + args.task_loss_scale * task_loss
                 
@@ -515,7 +525,8 @@ def train():
                                                     noise_timesteps=5,
                                                     denoise_timesteps=5,
                                                     num_inference_steps=5,
-                                                    use_classifier_guidence=False)
+                                                    use_classifier_guidence=False,
+                                                    inversion=False)
 
                         if accelerator.is_main_process and args.report_to == "wandb":
                             for metric, score in eval_results.items():
@@ -687,7 +698,6 @@ def parse_args():
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
     )
 
-
     parser.add_argument(
         "--dataloader_num_workers",
         type=int,
@@ -771,6 +781,14 @@ def parse_args():
         type=float, 
         default=0.0
     )
+    
+    parser.add_argument(
+        "--task_loss_switch_step",
+        type=int,
+        default=-1,
+        help="If >0, after this many optimization steps use multi_feat for task loss (if available). Default 0 -> always use model_pred."
+    )
+    
 
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:

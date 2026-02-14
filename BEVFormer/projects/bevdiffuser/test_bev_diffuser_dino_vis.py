@@ -377,7 +377,7 @@ def evaluate(unet,
         dino_cond = get_dino(img, img_metas)    
         t_test = torch.tensor([0] * latents.shape[0], device=latents.device)  
         # output, multi_feat, out_list = unet(latents, t_test, dino_cond, **cond)
-        output, out_list, inter_feats = unet(latents, t_test, dino_cond, **cond)
+        output, out_list = unet(latents, t_test, dino_cond, **cond)
 
 
         ## -------------------------------- PCA -------------------------------- ##
@@ -441,19 +441,19 @@ def evaluate(unet,
         # )
         
         #--------- version 2 (DINOV2 style): visualize only 1 feature ---------
-        fig, axes, pca, stats = visualize_single_bev_pca_and_lidar(
-            bev_bchw=inter_feats[8],              # (B,C,H,W)
-            b=0,
-            nusc=nusc,
-            sample_token=sample_token,
-            bev_extent=extent,
-            out_dir=f"{save_path}/visualize/rgb_pca_feat/rgb_pca_bicubic_out50",
-            title=f"step {step} | BEV feature out-block 50x50 (PCA)",
-            show=False,
-            pca_whiten=False,
-            pca_clip=(2, 98),
-            pca_gamma=1.2
-            )
+        # fig, axes, pca, stats = visualize_single_bev_pca_and_lidar(
+        #     bev_bchw=inter_feats[8],              # (B,C,H,W)
+        #     b=0,
+        #     nusc=nusc,
+        #     sample_token=sample_token,
+        #     bev_extent=extent,
+        #     out_dir=f"{save_path}/visualize/rgb_pca_feat/rgb_pca_bicubic_out50_t100",
+        #     title=f"step {step} | BEV feature out-block 50x50 (PCA)",
+        #     show=False,
+        #     pca_whiten=False,
+        #     pca_clip=(2, 98),
+        #     pca_gamma=1.2
+        #     )
         
         
      
@@ -550,24 +550,24 @@ def evaluate(unet,
         # )
         
         #------- original feature & all inter features & concat feature -------
-        # inter_list = inter_feats
-        # # inter_list.append(output)
-        # res = render_unet_intermediates_all(
-        #         inter_list=inter_list,    # 작은 해상도 -> 큰 해상도
-        #         pre_bchw=original_bev,
-        #         concat_bchw=output,
-        #         b=0,
-        #         nusc=nusc, sample_token=sample_token,
-        #         out_dir=f"{save_path}/visualize/unet_intermediates_all_t0",
-        #         title=f"step {step} | UNet Intermediates (Energy)",
-        #         mode="energy", agg="l1", whiten=True,
-        #         smooth_sigma=0.8,
-        #         joint_clip=(2,98), gamma=1.0,
-        #         bev_cmap="viridis", bev_interp="bilinear",
-        #         bev_extent=extent, bev_origin="lower",
-        #         lidar_axes_limit=50.0,
-        #         figsize=(22, 8), dpi=300, show=False,
-        #     )
+        inter_list = out_list
+        # inter_list.append(output)
+        res = render_unet_intermediates_all(
+                inter_list=inter_list,    # 작은 해상도 -> 큰 해상도
+                pre_bchw=original_bev,
+                concat_bchw=output,
+                b=0,
+                nusc=nusc, sample_token=sample_token,
+                out_dir=f"{save_path}/visualize/unet_intermediates_all_t0",
+                title=f"step {step} | UNet Intermediates (Energy)",
+                mode="energy", agg="l1", whiten=True,
+                smooth_sigma=0.8,
+                joint_clip=(2,98), gamma=1.0,
+                bev_cmap="viridis", bev_interp="bilinear",
+                bev_extent=extent, bev_origin="lower",
+                lidar_axes_limit=50.0,
+                figsize=(22, 8), dpi=300, show=False,
+            )
   
 
 if __name__ == "__main__":

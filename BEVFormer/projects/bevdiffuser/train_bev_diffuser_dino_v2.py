@@ -58,8 +58,9 @@ from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from test_bev_diffuser_dino_v2 import evaluate
 from torch.utils.tensorboard import SummaryWriter
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOv2Cond, GetDINOv2, GetDINOv2CondV2
 from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
+from projects.bevdiffuser.load_depth import LoadDepth
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -155,8 +156,8 @@ def train():
         
     # Get DINOv2 feature extractor
     get_dino = GetDINOv2Cond()
+    get_depth = LoadDepth()
     
-    # multi_scale_concat = MultiScaleConcat(in_chs=(256,512,1024), out_dim=256, mid=256, use_concat=True)
 
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
 
@@ -308,6 +309,7 @@ def train():
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num dataloader = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Num update steps per epoch = {num_update_steps_per_epoch}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
@@ -351,6 +353,14 @@ def train():
                 continue
 
             with accelerator.accumulate(unet):
+                # Get condition
+                img = batch['img'].data[0]
+                len_queue = img.size(1)
+                img = img[:, -1, ...]
+                img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
+                dino_out = get_dino(img, img_metas)
+                dino_cond = get_dino_cond(dino_out)
+                
                 # Get BEV
                 with torch.no_grad():
                     latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
@@ -369,7 +379,6 @@ def train():
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 
                 # Get the target for loss depending on the prediction type
-
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 elif noise_scheduler.config.prediction_type == "sample":
@@ -379,20 +388,13 @@ def train():
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 
-                img = batch['img'].data[0]
-                len_queue = img.size(1)
-                img = img[:, -1, ...]
-                img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
-                dino_out = get_dino(img, img_metas)
-                cond = get_dino_cond(dino_out)
-                
                 # Predict the noise residual and compute loss
-                model_pred, multi_feat, _ = unet(noisy_latents, timesteps, **cond)
+                model_pred = unet(noisy_latents, timesteps, dino_cond)[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
                 if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
-                    task_loss = get_task_loss(multi_feat, **batch)
+                    task_loss = get_task_loss(model_pred, **batch)
                 else:
                     task_loss = 0
                     
@@ -471,7 +473,7 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step > 20000:
+                    if global_step in [10000, 30000, 50000]:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')
@@ -484,9 +486,9 @@ def train():
                                                     bev_cfg=bev_cfg,
                                                     eval='bbox',
                                                     save_path=eval_path,
-                                                    noise_timesteps=0,
-                                                    denoise_timesteps=0,
-                                                    num_inference_steps=0,
+                                                    noise_timesteps=5,
+                                                    denoise_timesteps=5,
+                                                    num_inference_steps=5,
                                                     use_classifier_guidence=False)
 
                         if accelerator.is_main_process and args.report_to == "wandb":
@@ -742,6 +744,13 @@ def parse_args():
         "--task_loss_scale", 
         type=float, 
         default=0.0
+    )
+    
+    
+    parser.add_argument(
+        "--depth_save_dir",
+        type=str,
+        default=None
     )
 
     args = parser.parse_args()

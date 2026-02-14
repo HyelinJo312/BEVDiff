@@ -27,6 +27,7 @@ eggs/
 lib/
 lib64/
 parts/
+depth_map/
 sdist/
 var/
 wheels/
@@ -137,3 +138,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+*.npy
+*.pth
+*.bin
+*.pkl

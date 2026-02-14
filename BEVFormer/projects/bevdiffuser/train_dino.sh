@@ -5,14 +5,14 @@
 GPUS=4
 PORT=${PORT:-29501}
 
-BEV_CONFIG="../configs/bevdiffuser/layout_tiny_dino_2d.py"
+BEV_CONFIG="../configs/bevdiffuser/dino_tiny.py"
 BEV_CHECKPOINT="../../ckpts/bevformer_tiny_epoch_24.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
 PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_tiny_GT-dino_only-dino_2dNbev
+RUN_NAME=BEVDiffuser_tiny_DINO
 # checkpoint settings
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=3
@@ -51,7 +51,7 @@ PYTHONPATH="$(dirname $0)/../..":$PYTHONPATH \
 # python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port=$PORT \
 torchrun --nproc_per_node $GPUS \
     --master_port=29505 \
-  $(dirname "$0")/train_bev_diffuser_dino.py \
+  $(dirname "$0")/train_bev_diffuser_dino_v2.py \
     --bev_config $BEV_CONFIG \
     --bev_checkpoint $BEV_CHECKPOINT \
     --pretrained_unet_checkpoint $PRETRAINED_UNET_CHECKPOINT \

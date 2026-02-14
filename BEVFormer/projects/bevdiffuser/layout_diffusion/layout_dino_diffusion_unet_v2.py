@@ -1043,7 +1043,7 @@ class LayoutDiffusionUNetModel(nn.Module):
 
         # DINO feature condition
         # self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, pool='mean')
-        self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, num_views=6)
+        # self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, num_views=6)
         
         self.aligner = DINOBevAligner(c_dino=dino_dim, c_ctx=context_dim)
         
@@ -1307,13 +1307,13 @@ class LayoutDiffusionUNetModel(nn.Module):
         )
         xf_proj, xf_out = layout_outputs["xf_proj"], layout_outputs["xf_out"]  # xf_proj: (B, 1024), xf_out: (B, 256, 300)
         
-        B, V, _ = dino_cond['last_cls'].shape
-        cam_ids = th.arange(V, dtype=th.long, device=emb.device).unsqueeze(0).expand(B, V)
-        dino_cond_proj = self.adapter(dino_cond['last_cls'], cam_ids=cam_ids)
+        # B, V, _ = dino_cond['last_cls'].shape
+        # cam_ids = th.arange(V, dtype=th.long, device=emb.device).unsqueeze(0).expand(B, V)
+        # dino_cond_proj = self.adapter(dino_cond['last_cls'], cam_ids=cam_ids)
 
-        # emb = emb + xf_proj.to(emb) # emb: (B, 1024)
+        emb = emb + xf_proj.to(emb) # emb: (B, 1024)
         
-        emb = emb + xf_proj.to(emb)+ dino_cond_proj.to(emb)  # emb: (B, 1024)
+        # emb = emb + xf_proj.to(emb)+ dino_cond_proj.to(emb)  # emb: (B, 1024)
 
         bev_ctx = self.aligner(dino_cond['last_tokens'], patch_hw=dino_cond['patch_hw'], 
                                img_metas=dino_cond['img_metas'], dino_geom=dino_cond['geom'])   # (B,256,50,50)
@@ -1336,15 +1336,14 @@ class LayoutDiffusionUNetModel(nn.Module):
                 extra_outputs.append(extra_output)
             hs.append(h)
         
-        # inter_feats = []
+        inter_feats = []
+        
         # Middle block
         dino_tokens_mid = self._select_ctx(tokens_by_ds, self.middle_block)
         h, extra_output = self.middle_block(h, emb, layout_outputs, dino_tokens_mid)
-        # h, extra_output = self.middle_block(h, emb, layout_outputs)
         if extra_output is not None:
             extra_outputs.append(extra_output)
-        # out_list.append(h)
-        # inter_feats.append(h)
+        inter_feats.append(h)
 
         # Decoder
         for i_out, module in enumerate(self.output_blocks):
@@ -1352,7 +1351,7 @@ class LayoutDiffusionUNetModel(nn.Module):
             dino_tokens = self._select_ctx(tokens_by_ds, module)
             h, extra_output = module(h, emb, layout_outputs, dino_tokens)
             # h, extra_output = module(h, emb, layout_outputs)
-            # inter_feats.append(h)
+            inter_feats.append(h)
             if extra_output is not None:
                 extra_outputs.append(extra_output)
             # if i_out in [1, 4]:
@@ -1370,7 +1369,7 @@ class LayoutDiffusionUNetModel(nn.Module):
             multi_feat = self.multi_concat(out_list[::-1]) 
             return final, multi_feat, out_list
         else:
-            return [final]
+            return final, inter_feats
     
     def save_pretrained(self, save_directory):
         if os.path.isfile(save_directory):

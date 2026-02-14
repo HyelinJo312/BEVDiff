@@ -4,9 +4,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 BEV_CONFIG="../configs/bevdiffuser/layout_tiny_dino_2d.py"
 
-CHECKPOINT_DIR="../../../results/stage1/BEVDiffuser_tiny_GT-dino_only-dino_2D/checkpoint-50000"
+CHECKPOINT_DIR="results/stage1/BEVDiffuser_tiny_GT-dino_only-dino/checkpoint-50000"
 
-BEV_CHECKPOINT="../../../results/stage1/BEVDiffuser_tiny_GT-dino_only-dino_2D/checkpoint-50000/bev_model.pth"
+BEV_CHECKPOINT="results/stage1/BEVDiffuser_tiny_GT-dino_only-dino/checkpoint-50000/bev_model.pth"
 # "../../ckpts/bevformer_tiny_epoch_24.pth" 
 
 PREDICTION_TYPE="sample"
@@ -30,6 +30,7 @@ torchrun --nproc_per_node=4 \
     --noise_timesteps 5 \
     --denoise_timesteps 5 \
     --num_inference_steps 5 \
+    --inversion False \
     # --use_classifier_guidence \
 
 

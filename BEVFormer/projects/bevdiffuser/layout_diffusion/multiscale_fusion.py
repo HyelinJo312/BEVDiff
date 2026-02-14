@@ -223,6 +223,7 @@ class MultiScaleConcatFusion(nn.Module):
 class MultiScaleConcatWeighted(nn.Module):
     def __init__(self, in_chs=[256, 512, 1024, 1024], out_dim=256, mid=256, T=1.0):
         """
+        Hierarchical feature fusion with learned spatial weights
         Learned weighted fusion at each merge step (x2<->x3, x1<->up(f1), x0<->up(f2)).
         Weights are spatial (H×W), sum-to-one via softmax (temperature T).
         """
@@ -304,12 +305,66 @@ class MultiScaleConcatWeighted(nn.Module):
 
         return self.out_layer(x)
 
-
 class MultiScaleWeightedSum(nn.Module):
+    def __init__(self, in_chs=[256, 256, 256, 512], out_dim=256, mid=256):
+        """
+        Global-weighted
+        - len(in_chs) == len(xs)
+        - learnable scalar weight로 scale별 feature를 weighted-concat
+        """
+        super().__init__()
+        self.in_chs = in_chs
+        self.num_scales = len(in_chs)
+        self.mid = mid
+
+        self.bottlenecks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(c, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(32, mid),
+                nn.SiLU(inplace=True),
+            ) for c in in_chs])
+
+        # Learnable scalar mixing weights 
+        mixing_weights = th.ones(self.num_scales)
+        self.mixing_weights = nn.Parameter(mixing_weights)
+
+    def forward(self, xs):
+        assert len(xs) == self.num_scales, \
+            f"Expected {self.num_scales} features, got {len(xs)}"
+            
+        B, _, H, W = xs[0].shape
+        output_feature = None
+        
+        # Compute softmax weights across scales
+        weights = F.softmax(self.mixing_weights, dim=0)  # (N,)
+        
+        weighted_feats = []
+        for i, x in enumerate(xs):
+            # 1) Upsampling
+            if x.shape[-2:] != (H, W):
+                x_up = F.interpolate(x, size=(H, W), mode='bilinear', align_corners=False)
+            else:
+                x_up = x
+
+            # 2) Bottleneck projection
+            f = self.bottlenecks[i](x_up)  # (B, mid, H, W)
+
+            # 3) Apply learnable scalar weight
+            weighted_f = weights[i] * f  # (B, mid, H, W)
+            weighted_feats.append(weighted_f)
+
+            # 4) Accumulate (weighted-sum)
+            if output_feature is None:
+                output_feature = weighted_f
+            else:
+                output_feature += weighted_f
+        return output_feature
+
+
+class MultiScaleWeightedSumV2(nn.Module):
     def __init__(self, in_chs=[256, 512, 1024, 1024], out_dim=256, mid=256, T=1.0):
         """
-        - len(in_chs) == len(xs)
-        - xs[0]의 해상도로 모두 upsample
+        Local-weighted 
         - upsample 후 bottleneck으로 채널을 mid로 통일
         - spatial softmax로 scale별 weight 구해서 weighted-sum
         """
@@ -319,15 +374,13 @@ class MultiScaleWeightedSum(nn.Module):
         self.T = T
         self.mid = mid
 
-        # Upsampling 이후 bottleneck
+        # bottleneck after upsampling
         self.bottlenecks = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(c, mid, kernel_size=1, bias=False),
                 nn.GroupNorm(32, mid),
                 nn.SiLU(inplace=True),
-            )
-            for c in in_chs
-        ])
+            ) for c in in_chs])
 
         # Bottleneck feature 기준 gate logits
         self.gates = nn.ModuleList([
@@ -339,14 +392,14 @@ class MultiScaleWeightedSum(nn.Module):
         self.alpha = nn.Parameter(th.ones(self.num_scales))
 
         # weighted-sum 이후 projection (입력 채널 = mid 하나뿐)
-        self.out_layer = nn.Sequential(
-            nn.Conv2d(mid, mid, kernel_size=1, bias=False),
-            nn.GroupNorm(32, mid),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(mid, out_dim, kernel_size=1, bias=False),
-        )
+        # self.out_layer = nn.Sequential(
+        #     nn.Conv2d(mid, mid, kernel_size=1, bias=False),
+        #     nn.GroupNorm(32, mid),
+        #     nn.SiLU(inplace=True),
+        #     nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False),
+        #     nn.SiLU(inplace=True),
+        #     nn.Conv2d(mid, out_dim, kernel_size=1, bias=False),
+        # )
 
         for g in self.gates:
             nn.init.zeros_(g.bias)
@@ -354,8 +407,6 @@ class MultiScaleWeightedSum(nn.Module):
     def forward(self, xs):
         assert len(xs) == self.num_scales, \
             f"Expected {self.num_scales} features, got {len(xs)}"
-
-        # 기준 해상도: 첫 번째 feature
         B, _, H, W = xs[0].shape
 
         up_feats = []
@@ -388,7 +439,8 @@ class MultiScaleWeightedSum(nn.Module):
         weights_exp = weights.unsqueeze(2)               # (B, N, 1, H, W)
         fused = (feats_stack * weights_exp).sum(dim=1)   # (B, mid, H, W)
 
-        return self.out_layer(fused)
+        # return self.out_layer(fused)
+        return fused
 
     
     

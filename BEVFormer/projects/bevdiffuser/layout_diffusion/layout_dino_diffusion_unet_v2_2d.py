@@ -782,14 +782,7 @@ class DINOContextAdapter(nn.Module):
         self.view_bias = nn.Parameter(th.zeros(num_views))
 
         # projection to emb dim
-        # self.proj = nn.Sequential(
-        #     nn.Linear(c_in, c_emb),
-        #     nn.GELU(),
-        #     nn.Linear(c_emb, c_emb),
-        # )
         self.proj = nn.Linear(c_in, c_emb)
-  
-        # self.ln_after = nn.LayerNorm(c_emb) if ln_after else None
 
     def forward(self, context, cam_ids=None):
         """
@@ -826,8 +819,7 @@ class DINOContextAdapter(nn.Module):
         g = (w * x).sum(dim=1)                            # (B, C_in)
 
         g = self.proj(g)                                  # (B, C_emb)
-        # if self.ln_after is not None:
-        #     g = self.ln_after(g)
+
         return g
 
 
@@ -1464,10 +1456,9 @@ class LayoutDiffusionUNetModel(nn.Module):
         dino_cond_proj = self.adapter(dino_cond['last_cls'], cam_ids=cam_ids)
 
         # emb = emb + xf_proj.to(emb) # emb: (B, 1024)
-        emb = emb + xf_proj.to(emb) + dino_cond_proj.to(emb)  # emb: (B, 1024)
+        emb = emb + xf_proj.to(emb)+ dino_cond_proj.to(emb)  # emb: (B, 1024)
         
-        bev_ctx = self.aligner(dino_cond['last_tokens'], patch_hw=dino_cond['patch_hw'], 
-                        img_metas=dino_cond['img_metas'], dino_geom=dino_cond['geom'])   # (B,256,50,50)
+        bev_ctx = self.aligner(dino_cond['last_tokens'], patch_hw=dino_cond['patch_hw'], img_metas=dino_cond['img_metas'], dino_geom=dino_cond['geom'])   # (B,256,50,50)
 
         out_list = []
         
@@ -1513,7 +1504,7 @@ class LayoutDiffusionUNetModel(nn.Module):
             multi_feat = self.multi_concat(out_list[::-1]) 
             return final, multi_feat, out_list
         else:
-            return final
+            return [final]
         
     def save_pretrained(self, save_directory):
         if os.path.isfile(save_directory):
