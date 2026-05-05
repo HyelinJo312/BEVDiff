@@ -1,5 +1,5 @@
 <div align="center">
-<h2> Original BEVDiffuser with DINOv2 Guidance </h2> 
+<h2> BEVDiffuser with Semantic Guidance </h2> 
     
 **BEVDiffuser: Plug-and-Play Diffusion Model for BEV Denoising</br>with Ground-Truth Guidance**
     
