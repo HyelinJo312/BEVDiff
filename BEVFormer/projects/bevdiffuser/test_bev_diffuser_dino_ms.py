@@ -45,7 +45,7 @@ from mmdet.apis import set_random_seed
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from layout_diffusion.layout_dino_diffusion_unet_v2 import LayoutDiffusionUNetModel
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -181,7 +181,7 @@ def test():
     unet.requires_grad_(False) 
     unet.eval()
 
-    get_dino = GetDINOv2Cond()
+    get_dino = GetDINOV2Feat()
     
     bev_cfg.data.test.test_mode = True
     bev_cfg.data.test.load_annos = True

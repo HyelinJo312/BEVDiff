@@ -32,6 +32,9 @@ class_names = [
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
+total_class = class_names
+seg_class = None
+
 input_modality = dict(
     use_lidar=False,
     use_camera=True,
@@ -50,6 +53,8 @@ queue_length = 3 # each sequence contains `queue_length` frames.
 num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
+use_layout = True
+use_semantics = False
 
 unet = dict(
     type='projects.bevdiffuser.layout_diffusion.layout_diffusion_unet.LayoutDiffusionUNetModel',
@@ -233,8 +238,8 @@ dataset_type = 'CustomNuScenesDiffusionDataset_layout'
 # data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/'
 # info_root = "/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/" # bevformer info
 # data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/'
-# data_root = 'data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+data_root = 'data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 
@@ -273,11 +278,13 @@ test_pipeline = [
 
 data = dict(
     samples_per_gpu=4,
-    workers_per_gpu=8,
+    workers_per_gpu=4,
     train=dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
+        use_layout=use_layout,
+        use_semantics=use_semantics,
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -291,11 +298,15 @@ data = dict(
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
+             use_layout=use_layout,
+             use_semantics=use_semantics,
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
+              use_layout=use_layout,
+              use_semantics=use_semantics,
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
@@ -319,7 +330,7 @@ lr_config = dict(
     warmup_iters=500,
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
-total_epochs = 12
+total_epochs = 24
 evaluation = dict(interval=6, pipeline=test_pipeline)
 
 runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
@@ -331,7 +342,7 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=3)
 
 custom_hooks = [
     dict(type='UpdateTarget', epoch_interval=0)

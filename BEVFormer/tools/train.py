@@ -38,8 +38,10 @@ from mmdet.apis import set_random_seed
 from mmseg import __version__ as mmseg_version
 
 from mmcv.utils import TORCH_VERSION, digit_version
-# from BEVFormer.tools.bevdiffuser import BEVDiffuser
-from bevdiffuser_dino import BEVDiffuser
+from bevdiffuser import BEVDiffuser
+# from bevdiffuser_dino import BEVDiffuser
+# from bevdiffuser_seg import BEVDiffuser
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
@@ -346,7 +348,7 @@ def main():
         validate=(not args.no_validate),
         timestamp=timestamp,
         meta=meta,
-        model_target=model_target,
+        model_target=model_target, # pretrained BEV encoder
         bev_diffuser=bev_diffuser)
 
 

@@ -7,7 +7,7 @@ import torch.nn as nn
 # from diffusers import UNet2DConditionModel
 from projects.bevdiffuser.model_utils import build_unet, instantiate_from_config
 from projects.bevdiffuser.scheduler_utils import DDIMGuidedScheduler
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 class BEVDiffuser(nn.Module):
     def __init__(self,

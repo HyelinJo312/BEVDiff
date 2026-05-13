@@ -668,7 +668,6 @@ class LayoutDiffusionUNetModel(nn.Module):
             norm_first=False,
             norm_for_obj_embedding=False,
             num_pre_downsample=0,
-            return_multiscale=True,
             multiscale_indices='auto'
     ):
         super().__init__()
@@ -706,8 +705,6 @@ class LayoutDiffusionUNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
 
-        # multi-scale features index
-        self.return_multiscale = return_multiscale
         L = len(self.channel_mult)              # 레벨 수
         bpl = self.num_res_blocks + 1           # blocks per level
         # 최상위(레벨 0) 제외: 깊은 레벨들만 택함
@@ -924,7 +921,6 @@ class LayoutDiffusionUNetModel(nn.Module):
 
         emb = emb + xf_proj.to(emb) # emb: (B, 1024)
 
-        out_list = []
         h = x.type(self.dtype)  # h: (B, C, H, W)
         for module in self.downsample_blocks:
             h = module(h) 
@@ -941,19 +937,12 @@ class LayoutDiffusionUNetModel(nn.Module):
             h, extra_output = module(h, emb, layout_outputs)
             if extra_output is not None:
                 extra_outputs.append(extra_output)
-            if self.return_multiscale and (i_out in self._ms_take):  # i_out in [1, 4]:
-                out_list.append(h)
             
         h = h.type(x.dtype)
         h = self.out(h)
         for module in self.upsample_blocks:
             h = module(h)
-
-        if self.return_multiscale:
-            out_list.append(h)
-            return out_list[::-1], extra_outputs
-        else:
-            return [h, extra_outputs]
+        return [h, extra_outputs]
     
     def save_pretrained(self, save_directory):
         if os.path.isfile(save_directory):

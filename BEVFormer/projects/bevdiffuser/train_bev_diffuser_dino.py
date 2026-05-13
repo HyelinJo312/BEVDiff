@@ -57,7 +57,7 @@ from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from test_bev_diffuser_dino import evaluate
 from torch.utils.tensorboard import SummaryWriter
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -151,7 +151,7 @@ def train():
         unet.upsample_blocks.requires_grad_(True)
 
     # Get DINOv2 feature extractor
-    get_dino = GetDINOv2Cond()
+    get_dino = GetDINOV2Feat(device=accelerator.device)
 
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
 
@@ -205,6 +205,9 @@ def train():
                                           'use_3d_bbox': bev_cfg.use_3d_bbox,
                                           'num_classes': bev_cfg.num_classes,
                                           'num_bboxes': bev_cfg.num_bboxes,
+                                          'use_layout': True,
+                                          'use_semantics': False,
+                                          
                                       })
         
         bev_cfg.data.test.load_annos = True
@@ -214,6 +217,8 @@ def train():
                                         'use_3d_bbox': bev_cfg.use_3d_bbox,
                                         'num_classes': bev_cfg.num_classes,
                                         'num_bboxes': bev_cfg.num_bboxes,
+                                        'use_layout': True,
+                                        'use_semantics': False,
                                     })
         
       
@@ -280,12 +285,10 @@ def train():
         else:
             cond = dino_out
         return cond
-
     
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
-
 
     weight_dtype = torch.float32
 
@@ -412,10 +415,9 @@ def train():
                 dino_cond = get_dino_cond(dino_out)
 
                 cond = get_condition(batch)
-                
+
                 # Predict the noise residual and compute loss
-                # model_pred, multi_feat, _ = unet(noisy_latents, timesteps, dino_cond, **cond)
-                model_pred = unet(noisy_latents, timesteps, dino_cond, **cond)[0]
+                model_pred = unet(noisy_latents, timesteps, img_metas, dino_cond, **cond)
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -423,16 +425,6 @@ def train():
                     task_loss = get_task_loss(model_pred, **batch)
                 else:
                     task_loss = 0
-                    
-                # if args.task_loss_scale > 0 and noise_scheduler.config.prediction_type == "sample":
-                #     # Switch when global_step >= args.task_loss_switch_step.
-                #     if args.task_loss_switch_step is not None and global_step >= args.task_loss_switch_step:
-                #         if multi_feat is not None:
-                #             task_loss = get_task_loss(multi_feat, **batch)
-                #         else:
-                #             task_loss = get_task_loss(model_pred, **batch)
-                # else:
-                #     task_loss = 0
                     
                 total_loss = denoise_loss + args.task_loss_scale * task_loss
                 
@@ -509,7 +501,7 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step in [30000, 50000]:
+                    if global_step % args.checkpointing_steps == 0:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')
@@ -525,8 +517,7 @@ def train():
                                                     noise_timesteps=5,
                                                     denoise_timesteps=5,
                                                     num_inference_steps=5,
-                                                    use_classifier_guidence=False,
-                                                    inversion=False)
+                                                    use_classifier_guidence=False)
 
                         if accelerator.is_main_process and args.report_to == "wandb":
                             for metric, score in eval_results.items():
@@ -632,6 +623,14 @@ def parse_args():
         type=float, 
         help="The probability of replacing caption with empty string."
     )
+    
+    parser.add_argument(
+        "--uncond_prob_seg", 
+        default=0.2, 
+        type=float, 
+        help="The probability of replacing caption with empty string."
+    )
+
 
     parser.add_argument(
         "--output_dir",

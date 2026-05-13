@@ -323,7 +323,7 @@ def main():
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
     
-    model_target = None
+    model_target = None 
     bev_diffuser = None
     if cfg.bev_diffuser_cfg is not None:
         model_target = copy.deepcopy(model)
@@ -346,7 +346,7 @@ def main():
         validate=(not args.no_validate),
         timestamp=timestamp,
         meta=meta,
-        model_target=model_target,
+        model_target=model_target, # pretrained BEVFormer
         bev_diffuser=bev_diffuser)
 
 

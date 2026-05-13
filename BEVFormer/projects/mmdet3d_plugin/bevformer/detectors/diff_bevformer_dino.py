@@ -14,7 +14,7 @@ import numpy as np
 import mmdet3d
 from .bevformer import BEVFormer
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 @DETECTORS.register_module()
 class DiffBEVFormerDINO(BEVFormer): 
@@ -24,7 +24,7 @@ class DiffBEVFormerDINO(BEVFormer):
         
         super().__init__(*args, **kwargs)
 
-        self.get_dino = GetDINOv2Cond()
+        self.get_dino = GetDINOV2Feat()
     
     def train_step(self, data, optimizer, model_target=None, bev_diffuser=None, progress=None):
         """The iteration step during training.

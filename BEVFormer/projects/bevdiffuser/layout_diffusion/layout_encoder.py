@@ -293,6 +293,6 @@ class LayoutTransformerEncoder(nn.Module):
         xf_out = xf_out.permute(0, 2, 1)  # NLC -> NCL
 
         outputs['xf_proj'] = xf_proj  # global condition
-        outputs['xf_out'] = xf_out    # object-wise condition
+        outputs['xf_out'] = xf_out    # object-wise condition (B,C,N) C=256, N=300
 
         return outputs

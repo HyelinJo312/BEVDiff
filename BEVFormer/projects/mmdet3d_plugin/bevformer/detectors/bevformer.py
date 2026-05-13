@@ -139,7 +139,7 @@ class BEVFormer(MVXTwoStageDetector):
             dict: Losses of each branch.
         """
 
-        outs = self.pts_bbox_head(
+        outs = self.pts_bbox_head(  # pts_feats는 batch size 설정용, prev_bev=None이어도됨, img_metas는 안에 뭐 있는지 확인 필요
             pts_feats, img_metas, prev_bev, given_bev=given_bev)
         loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
         losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)

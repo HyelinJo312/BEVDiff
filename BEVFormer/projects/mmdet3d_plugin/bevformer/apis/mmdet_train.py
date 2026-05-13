@@ -184,7 +184,7 @@ def custom_train_detector(model,
             'use_3d_bbox': cfg.use_3d_bbox,
             'num_classes': cfg.num_classes,
             'num_bboxes': cfg.num_bboxes,
-            'test_mode': True,
+            'test_mode': True
         }
 
         cfg.data.test.load_annos = True

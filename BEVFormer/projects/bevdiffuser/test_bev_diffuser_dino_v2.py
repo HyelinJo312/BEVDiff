@@ -45,7 +45,7 @@ from mmdet.apis import set_random_seed
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -169,13 +169,13 @@ def test():
         bev_model.requires_grad_(False)
     bev_model.eval()
     
-    unet = instantiate_from_config(bev_cfg.unet)
+    unet = build_unet(bev_cfg.unet)
     unet.from_pretrained(args.checkpoint_dir, subfolder="unet")
     unet.to(bev_model.device, dtype=torch.float32)
     unet.requires_grad_(False) 
     unet.eval()
     
-    get_dino = GetDINOv2Cond()
+    get_dino = GetDINOV2Feat()
     
     bev_cfg.data.test.test_mode = True
     bev_cfg.data.test.load_annos = True
@@ -185,6 +185,8 @@ def test():
                                         'use_3d_bbox': bev_cfg.use_3d_bbox,
                                         'num_classes': bev_cfg.num_classes,
                                         'num_bboxes': bev_cfg.num_bboxes,
+                                        'class_names': bev_cfg.total_class,
+                                        'seg_class': bev_cfg.seg_class
                                     })
     dataloader = build_dataloader(
         dataset,
@@ -236,6 +238,46 @@ def evaluate(unet,
         gradient = gradient.permute(0, 3, 1, 2)
         return gradient
     
+    def get_condition(batch, use_cond=True):
+        cond = {}
+        if 'layout_obj_classes' in batch:
+            cond['obj_class'] = torch.stack(batch['layout_obj_classes'].data[0])
+        if 'layout_obj_bboxes' in batch:
+            cond['obj_bbox'] = torch.stack(batch['layout_obj_bboxes'].data[0])
+        if 'layout_obj_is_valid' in batch:
+            cond['is_valid_obj'] = torch.stack(batch['layout_obj_is_valid'].data[0]) 
+        if 'layout_obj_names' in batch:
+            cond['obj_name'] = torch.stack(batch['layout_obj_names'].data[0])
+        
+        if not use_cond:
+            if isinstance(unet, LayoutDiffusionUNetModel):
+                if 'obj_class' in unet.layout_encoder.used_condition_types:
+                    cond['obj_class'] = torch.ones_like(cond['obj_class']).fill_(unet.layout_encoder.num_classes_for_layout_object - 1)
+                    cond['obj_class'][:, 0] = unet.layout_encoder.num_classes_for_layout_object - 2
+                if 'obj_name' in unet.layout_encoder.used_condition_types:
+                    cond['obj_name'] = torch.stack(batch['default_obj_names'].data[0])
+                if 'obj_bbox' in unet.layout_encoder.used_condition_types:
+                    cond['obj_bbox'] = torch.zeros_like(cond['obj_bbox'])
+                    if unet.layout_encoder.use_3d_bbox:
+                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 0, 1, 1, 1, 0, 0, 0])
+                    else:
+                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 1, 1])
+                cond['is_valid_obj'] = torch.zeros_like(cond['is_valid_obj'])
+                cond['is_valid_obj'][:, 0] = 1.0 
+        for key, value in cond.items():
+            if isinstance(value, torch.Tensor):
+                cond[key] = value.to(latents.device)            
+        return cond
+    
+    def get_dino_uncond(cond):
+            uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                     for k, v in cond.items()}
+            last_cls_u = torch.zeros_like(cond['last_cls'])  # (B,V,C_in)
+            last_tokens_u = torch.zeros_like(cond['last_tokens'])  # (B,V,N,C_in)
+            uncond['last_cls'] = last_cls_u
+            uncond['last_tokens'] = last_tokens_u
+            return uncond
+        
     det_res_path = f"{noise_timesteps}_{denoise_timesteps}_{num_inference_steps}"
     bbox_results = []
     mask_results = []
@@ -257,15 +299,6 @@ def evaluate(unet,
         img = batch['img'][0].data[0]
         img_metas = batch['img_metas'][0].data[0]
         
-        def get_dino_uncond(cond):
-            uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                     for k, v in cond.items()}
-            last_cls_u = torch.zeros_like(cond['last_cls'])  # (B,V,C_in)
-            last_tokens_u = torch.zeros_like(cond['last_tokens'])  # (B,V,N,C_in)
-            uncond['last_cls'] = last_cls_u
-            uncond['last_tokens'] = last_tokens_u
-            return uncond
-        
         if noise_timesteps > 0:
             if noise_timesteps > 1000:
                 latents = torch.randn_like(latents)
@@ -276,16 +309,26 @@ def evaluate(unet,
                 latents = noise_scheduler.add_noise(latents, noise, noise_timesteps)
         
         if denoise_timesteps > 0:    
-            cond = get_dino(img, img_metas)    
-            uncond = get_dino_uncond(cond)
+            cond, uncond = get_condition(batch, use_cond=True), get_condition(batch, use_cond=False)
             
+            dino_cond = get_dino(img, img_metas)
+            dino_uncond = get_dino_uncond(dino_cond)
+
+            # Segmentation condition (optional)
+            use_semantics = getattr(bev_cfg, 'use_semantics', False)
+            seg_cond = None
+            if use_semantics and 'seg_maps' in batch:
+                seg_maps = torch.stack(batch['seg_maps'].data[0], dim=0).to(latents.device)
+                seg_cond = seg_maps
+                
             # # DDIM
             noise_scheduler.config.num_train_timesteps=denoise_timesteps
             noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
-            
+
             for _, t in enumerate(noise_scheduler.timesteps): # always use multi-scale features
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, uncond), unet(latents, t_batch, cond)
+                noise_pred_uncond = unet(latents, t_batch, img_metas, dino_uncond, seg_cond, **uncond)[0]
+                noise_pred_cond = unet(latents, t_batch, img_metas, dino_cond, seg_cond, **cond)[0]
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]

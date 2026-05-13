@@ -7,7 +7,7 @@ import torch.nn as nn
 # from diffusers import UNet2DConditionModel
 from projects.bevdiffuser.model_utils import build_unet, instantiate_from_config
 from projects.bevdiffuser.scheduler_utils import DDIMGuidedScheduler
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 class BEVDiffuser(nn.Module):
     def __init__(self,
@@ -32,7 +32,7 @@ class BEVDiffuser(nn.Module):
         self.unet.from_pretrained(unet_checkpoint_dir, subfolder="unet")
         self.unet.requires_grad_(False)
         
-        self.get_dino = GetDINOv2Cond() 
+        self.get_dino = GetDINOV2Feat() 
         
         self.noise_timesteps = noise_timesteps
         self.denoise_timesteps = denoise_timesteps

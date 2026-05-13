@@ -50,6 +50,8 @@ queue_length = 3 # each sequence contains `queue_length` frames.
 num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
+use_layout = True
+use_semantics = False
 
 unet = dict(
     type='layout_diffusion.layout_diffusion_unet.LayoutDiffusionUNetModel',
@@ -72,7 +74,6 @@ unet = dict(
         dropout=0.0,
         use_checkpoint=False,
         use_positional_embedding_for_attention=True,
-        return_multiscale=False,
         attention_block_type='ObjectAwareCrossAttention',
         layout_encoder=dict(
             type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
@@ -262,6 +263,9 @@ data = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
+        use_layout=use_layout,
+        use_semantics=use_semantics,
+        semantic_path='None',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -275,11 +279,17 @@ data = dict(
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
+             use_layout=use_layout,
+             use_semantics=use_semantics,
+             semantic_path='None',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
+              use_layout=use_layout,
+              use_semantics=use_semantics,
+              semantic_path='None',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),

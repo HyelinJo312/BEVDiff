@@ -176,6 +176,381 @@ def _draw_lidar_top_on_axes(nusc, sample_token, ax,
     ax.set_aspect('equal')
 
 
+# -------------- 4-way joint percentile normalization --------------
+def _percentile_norm_joint_n(arrs, p_low=2.0, p_high=98.0, eps=1e-6):
+    """Joint percentile scaling to [0,1] across N maps for fair comparison."""
+    vec = np.concatenate([a.ravel() for a in arrs])
+    lo, hi = np.percentile(vec, [p_low, p_high])
+    def scale(x):
+        return np.clip((x - lo) / (hi - lo + eps), 0.0, 1.0).astype(np.float32)
+    return [scale(a) for a in arrs]
+
+
+# -------------- main: 4-way renderer (Original / Baseline / Ours / LiDAR) --------------
+def render_bev_quad(
+    bev_original_bchw, bev_baseline_bchw, bev_ours_bchw,
+    b=0,
+    nusc: NuScenes = None,
+    sample_token: str = None,
+    out_dir: str = None,
+    title: str = None,
+    labels=("Original BEV", "BEVDiffuser", "Ours (Semantic Guided)", "LiDAR Top"),
+    # BEV params
+    agg="l1", whiten=True,
+    smooth_sigma=0.8, joint_clip=(2.0, 98.0), gamma=1.0,
+    bev_cmap="viridis", bev_interp="bilinear",
+    bev_extent=None,
+    bev_origin="lower",
+    # LiDAR params
+    lidar_axes_limit=50.0, lidar_view=np.eye(4), lidar_show_boxes=True,
+    # LiDAR panel border (thin light-gray frame to match the BEV panels' shape)
+    lidar_border=True,
+    lidar_border_color="0.75",   # light gray (matplotlib gray-shade string)
+    lidar_border_lw=0.5,
+    # fig
+    layout="1x4",                # "1x4" or "2x2"
+    figsize=None, dpi=240, show=False,
+    save_format="pdf",           # "png" | "pdf" | "svg" ...
+    label_fontsize=18,
+    suptitle_fontsize=20,
+):
+    """
+    Render 4 panels in a single figure:
+        (1) Original BEV feature (pre-diffusion)
+        (2) BEVDiffuser denoised BEV (baseline)
+        (3) Ours denoised BEV (semantic-guided)
+        (4) LiDAR top-down view (ground reference)
+
+    All three BEV feature panels share a *joint* percentile normalization to make
+    activation magnitudes directly comparable across models.
+    """
+    O = _to_numpy(bev_original_bchw)
+    Bsl = _to_numpy(bev_baseline_bchw)
+    Os = _to_numpy(bev_ours_bchw)
+    for name, arr in (("original", O), ("baseline", Bsl), ("ours", Os)):
+        if arr.ndim != 4:
+            raise ValueError(f"Expected [B,C,H,W] for {name}, got {arr.shape}")
+    Bo, Co, H, W = O.shape
+    if Bsl.shape[2:] != (H, W) or Os.shape[2:] != (H, W):
+        raise ValueError(
+            f"Spatial mismatch: orig {O.shape[2:]}, baseline {Bsl.shape[2:]}, ours {Os.shape[2:]}")
+    for arr in (O, Bsl, Os):
+        if not (0 <= b < arr.shape[0]):
+            raise IndexError(f"batch index {b} out of range for shape {arr.shape}")
+
+    # per-feature energy maps (channel aggregation)
+    def _energy(arr):
+        C = arr.shape[1]
+        feat = arr[b].reshape(C, H * W).T
+        return _gaussian_blur_np(
+            _aggregate_energy(feat, agg=agg, whiten=whiten).reshape(H, W),
+            sigma=smooth_sigma,
+        )
+
+    e_orig = _energy(O)
+    e_base = _energy(Bsl)
+    e_ours = _energy(Os)
+
+    # Joint percentile normalization across all three feature maps for fair comparison
+    e_orig, e_base, e_ours = _percentile_norm_joint_n(
+        [e_orig, e_base, e_ours], p_low=joint_clip[0], p_high=joint_clip[1]
+    )
+    if gamma != 1.0:
+        e_orig = np.power(e_orig, gamma).astype(np.float32)
+        e_base = np.power(e_base, gamma).astype(np.float32)
+        e_ours = np.power(e_ours, gamma).astype(np.float32)
+
+    imshow_kwargs = dict(
+        cmap=bev_cmap, vmin=0.0, vmax=1.0, interpolation=bev_interp,
+        extent=bev_extent, origin=bev_origin,
+    )
+
+    # figure layout
+    if layout == "2x2":
+        if figsize is None:
+            figsize = (10, 10)
+        fig, axes = plt.subplots(2, 2, figsize=figsize, dpi=dpi)
+        axes = axes.ravel()
+    else:  # 1x4
+        if figsize is None:
+            figsize = (20, 5)
+        fig, axes = plt.subplots(1, 4, figsize=figsize, dpi=dpi)
+
+    feat_panels = [(e_orig, labels[0]), (e_base, labels[1]), (e_ours, labels[2])]
+    for ax, (img, lab) in zip(axes[:3], feat_panels):
+        ax.imshow(img, **imshow_kwargs)
+        ax.set_aspect('equal')
+        if bev_extent is not None:
+            ax.set_xlim(bev_extent[0], bev_extent[1])
+            ax.set_ylim(bev_extent[2], bev_extent[3])
+        ax.set_title(lab, fontsize=label_fontsize)
+        ax.axis('off')
+
+    # LiDAR panel
+    if (nusc is not None) and (sample_token is not None):
+        _draw_lidar_top_on_axes(
+            nusc, sample_token, axes[3],
+            view=lidar_view,
+            box_vis_level=BoxVisibility.ANY,
+            axes_limit=lidar_axes_limit,
+            show_boxes=lidar_show_boxes,
+            lidar_render_mode="scatter",
+            lidar_cmap="viridis",
+            pts_size=2.0, pts_stride=1, pts_alpha=0.9,
+            box_lw=0.6,
+            bev_extent=bev_extent,
+        )
+    else:
+        axes[3].text(0.5, 0.5, "LiDAR_TOP unavailable",
+                     ha="center", va="center", fontsize=10)
+        axes[3].axis('off'); axes[3].set_aspect('equal')
+
+    # _draw_lidar_top_on_axes calls ax.axis('off'), which hides the spines.
+    # Re-enable a thin light-gray frame so the LiDAR panel has a visible border
+    # matching the implicit edges of the BEV imshow panels.
+    if lidar_border:
+        ax_l = axes[3]
+        ax_l.set_axis_on()
+        ax_l.set_xticks([]); ax_l.set_yticks([])
+        ax_l.tick_params(left=False, right=False, top=False, bottom=False,
+                         labelleft=False, labelbottom=False)
+        for s in ax_l.spines.values():
+            s.set_visible(True)
+            s.set_color(lidar_border_color)
+            s.set_linewidth(lidar_border_lw)
+
+    axes[3].set_title(labels[3], fontsize=label_fontsize)
+
+    if title:
+        fig.suptitle(title, y=0.99, fontsize=suptitle_fontsize)
+
+    if out_dir is not None:
+        fmt = save_format.lstrip(".").lower()
+        out_file = _ensure_outfile(out_dir, title or "bev_quad", ext=f".{fmt}")
+        save_kwargs = dict(bbox_inches='tight', pad_inches=0.05, dpi=dpi)
+        if fmt in ("pdf", "ps", "eps"):
+            # TrueType (Type 42) font embedding for venue-compliant PDFs
+            plt.rcParams["pdf.fonttype"] = 42
+            plt.rcParams["ps.fonttype"] = 42
+        plt.savefig(out_file, **save_kwargs)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    return e_orig, e_base, e_ours
+
+
+# ============================================================================ #
+#  4-way RGB-PCA renderer  (Original / BEVDiffuser / Ours / LiDAR)
+# ============================================================================ #
+def _fit_joint_pca_n(
+    arrs_chw, n_components=3, whiten=False, eps=1e-6,
+    clip_percentile=(0.5, 99.5), gamma=1.0,
+):
+    """
+    Fit a SINGLE PCA on the concatenation of N (C,H,W) feature maps so that
+    the resulting RGB color is directly comparable across panels (same axes,
+    same scale, same sign convention).
+
+    Returns: list of (H,W,3) float32 in [0,1], the fitted PCA, and stats dict.
+    """
+    flats = []
+    H = W = None
+    for X in arrs_chw:
+        X = _to_numpy(X)
+        C, h, w = X.shape
+        if H is None:
+            H, W = h, w
+        elif (h, w) != (H, W):
+            raise ValueError(f"Spatial mismatch in PCA inputs: {(h, w)} vs {(H, W)}")
+        flats.append(X.reshape(C, -1).T)  # (N_i, C)
+
+    Xcat = np.concatenate(flats, axis=0)  # (sum N_i, C)
+    mean = Xcat.mean(axis=0, keepdims=True)
+    std = Xcat.std(axis=0, keepdims=True)
+    std = np.where(std < eps, eps, std)
+    Xcat_n = (Xcat - mean) / std
+
+    pca = PCA(n_components=n_components, whiten=whiten, random_state=0)
+    Ycat = pca.fit_transform(Xcat_n)
+
+    # Sign-fix each component so colors are consistent across runs/frames
+    flips = np.sign(np.sum(pca.components_, axis=1))
+    flips[flips == 0] = 1.0
+    Ycat = Ycat * flips
+
+    # Joint percentile clip + minmax in [0,1] across ALL panels
+    lo, hi = np.percentile(Ycat, clip_percentile, axis=0)
+    Ycat_c = np.clip(Ycat, lo, hi)
+    Ycat_s = minmax_scale(Ycat_c)
+    if gamma != 1.0:
+        Ycat_s = np.power(Ycat_s, gamma)
+
+    # Split back per-input
+    out = []
+    offset = 0
+    for f in flats:
+        n = f.shape[0]
+        out.append(Ycat_s[offset:offset + n].reshape(H, W, 3).astype(np.float32))
+        offset += n
+
+    stats = {
+        "mean": mean, "std": std,
+        "components": pca.components_ * flips[:, None],
+        "explained_variance_ratio": pca.explained_variance_ratio_,
+        "flips": flips,
+        "clip_percentile": clip_percentile, "gamma": gamma,
+    }
+    return out, pca, stats
+
+
+def _smooth_rgb_pipeline(img, upsample=3, ssaa=True, blur_sigma=0.8,
+                         edge_preserve="bilateral"):
+    """Same smoothing as visualize_bev_rgb_pca_triplet (for visual coherence)."""
+    import cv2
+    h, w = img.shape[:2]
+    if upsample and upsample > 1:
+        img = cv2.resize(img, (w * upsample, h * upsample), interpolation=cv2.INTER_CUBIC)
+    if edge_preserve == "bilateral":
+        for c in range(3):
+            img[..., c] = cv2.bilateralFilter(
+                (img[..., c] * 255).astype(np.uint8),
+                d=0, sigmaColor=30, sigmaSpace=3,
+            ) / 255.0
+    if blur_sigma and blur_sigma > 0:
+        img = cv2.GaussianBlur(img, (0, 0), blur_sigma)
+    if ssaa and upsample and upsample > 1:
+        img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+    return np.clip(img, 0.0, 1.0)
+
+
+def render_bev_pca_quad(
+    bev_original_bchw, bev_baseline_bchw, bev_ours_bchw,
+    b=0,
+    nusc: NuScenes = None,
+    sample_token: str = None,
+    out_dir: str = None,
+    title: str = None,
+    labels=("Original BEV", "BEVDiffuser", "Ours (Semantic Guided)", "LiDAR Top"),
+    # PCA params (ALL three feature maps share the same PCA basis + scale)
+    pca_whiten: bool = False,
+    pca_clip: tuple = (0.5, 99.5),
+    pca_gamma: float = 1.0,
+    # smoothing
+    upsample: int = 3, ssaa: bool = True,
+    blur_sigma: float = 0.8, edge_preserve: str = "bilateral",
+    interp: str = "bicubic",
+    # geometry
+    bev_extent=None, bev_origin: str = "lower",
+    # LiDAR params
+    lidar_axes_limit: float = 50.0, lidar_view=np.eye(4), lidar_show_boxes: bool = True,
+    lidar_border: bool = True,
+    lidar_border_color="0.75",
+    lidar_border_lw: float = 0.6,
+    # figure
+    layout: str = "1x4",   # "1x4" or "2x2"
+    figsize=None, dpi: int = 300, show: bool = False,
+):
+    """
+    Render 4 panels in one figure, with the three BEV panels visualized via a
+    *jointly-fit* PCA-RGB so that color semantics are directly comparable:
+
+        (1) Original BEV (RGB-PCA)
+        (2) BEVDiffuser denoised BEV (RGB-PCA)
+        (3) Ours denoised BEV (RGB-PCA)
+        (4) LiDAR top-down view (ground reference)
+
+    Joint PCA: a single PCA basis is fit on the concatenation of the three
+    feature maps; sign of each component is fixed; clip/scale is shared across
+    all panels. This is the DINOv2-style visualization extended to 3 maps.
+    """
+    O = _to_numpy(bev_original_bchw)
+    Bsl = _to_numpy(bev_baseline_bchw)
+    Os = _to_numpy(bev_ours_bchw)
+    for name, arr in (("original", O), ("baseline", Bsl), ("ours", Os)):
+        if arr.ndim != 4:
+            raise ValueError(f"Expected [B,C,H,W] for {name}, got {arr.shape}")
+    if not (0 <= b < O.shape[0] and 0 <= b < Bsl.shape[0] and 0 <= b < Os.shape[0]):
+        raise IndexError(f"batch index {b} out of range")
+
+    rgbs, pca, stats = _fit_joint_pca_n(
+        [O[b], Bsl[b], Os[b]],
+        n_components=3, whiten=pca_whiten,
+        clip_percentile=pca_clip, gamma=pca_gamma,
+    )
+    rgb_orig, rgb_base, rgb_ours = (
+        _smooth_rgb_pipeline(r, upsample=upsample, ssaa=ssaa,
+                             blur_sigma=blur_sigma, edge_preserve=edge_preserve)
+        for r in rgbs
+    )
+
+    # figure layout
+    if layout == "2x2":
+        if figsize is None:
+            figsize = (10, 10)
+        fig, axes = plt.subplots(2, 2, figsize=figsize, dpi=dpi)
+        axes = axes.ravel()
+    else:  # 1x4
+        if figsize is None:
+            figsize = (20, 5)
+        fig, axes = plt.subplots(1, 4, figsize=figsize, dpi=dpi)
+
+    feat_panels = [(rgb_orig, labels[0]), (rgb_base, labels[1]), (rgb_ours, labels[2])]
+    for ax, (img, lab) in zip(axes[:3], feat_panels):
+        ax.imshow(img, extent=bev_extent, origin=bev_origin, interpolation=interp)
+        ax.set_aspect('equal')
+        if bev_extent is not None:
+            ax.set_xlim(bev_extent[0], bev_extent[1])
+            ax.set_ylim(bev_extent[2], bev_extent[3])
+        ax.set_title(lab)
+        ax.axis('off')
+
+    # LiDAR panel
+    if (nusc is not None) and (sample_token is not None):
+        _draw_lidar_top_on_axes(
+            nusc, sample_token, axes[3],
+            view=lidar_view,
+            box_vis_level=BoxVisibility.ANY,
+            axes_limit=lidar_axes_limit,
+            show_boxes=lidar_show_boxes,
+            lidar_render_mode="scatter",
+            lidar_cmap="viridis",
+            pts_size=2.0, pts_stride=1, pts_alpha=0.9,
+            box_lw=0.6,
+            bev_extent=bev_extent,
+        )
+    else:
+        axes[3].text(0.5, 0.5, "LiDAR_TOP unavailable",
+                     ha="center", va="center", fontsize=10)
+        axes[3].axis('off'); axes[3].set_aspect('equal')
+
+    # Re-enable spines on the LiDAR panel for a thin light-gray frame
+    if lidar_border:
+        ax_l = axes[3]
+        ax_l.set_axis_on()
+        ax_l.set_xticks([]); ax_l.set_yticks([])
+        ax_l.tick_params(left=False, right=False, top=False, bottom=False,
+                         labelleft=False, labelbottom=False)
+        for s in ax_l.spines.values():
+            s.set_visible(True)
+            s.set_color(lidar_border_color)
+            s.set_linewidth(lidar_border_lw)
+
+    axes[3].set_title(labels[3])
+
+    if title:
+        fig.suptitle(title, y=0.99)
+
+    if out_dir is not None:
+        out_file = _ensure_outfile(out_dir, title or "bev_pca_quad")
+        plt.savefig(out_file, bbox_inches='tight', pad_inches=0.05, dpi=dpi)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    return rgb_orig, rgb_base, rgb_ours, stats
+
+
 # -------------- main: triplet renderer (Activation Map)--------------
 def render_bev_triplet(
     bev_pre_bchw, bev_post_bchw,
@@ -851,6 +1226,121 @@ def _fit_single_pca_and_scale(
         "gamma": gamma,
     }
     return rgb, pca, stats
+
+
+def render_bev_channel_avg_triplet(
+    bev_pre_bchw,
+    bev_post_bchw,
+    b=0,
+    nusc=None,
+    sample_token=None,
+    out_dir=None,
+    title=None,
+    labels=("BEVFormer", "BEVDiffuser", "LiDAR Top View"),
+    smooth_sigma=0.0,
+    joint_clip=(1.0, 99.0),
+    gamma=1.0,
+    bev_cmap="gray",
+    bev_interp="bilinear",
+    bev_extent=None,
+    bev_origin="lower",
+    lidar_axes_limit=50.0,
+    lidar_view=np.eye(4),
+    lidar_show_boxes=True,
+    figsize=(15, 5),
+    dpi=300,
+    show=False,
+):
+    """Triplet visualization matching Figure 1 style: channel-wise average → grayscale.
+
+    Averages all channels for each spatial location, giving a single (H,W) map.
+    Both pre/post maps share the same joint percentile normalization for fair comparison.
+
+    Args:
+        bev_pre_bchw:  (B,C,H,W) BEVFormer output feature.
+        bev_post_bchw: (B,C,H,W) BEVDiffuser denoised feature.
+        b: batch index.
+        labels: subplot titles (pre, post, lidar).
+        joint_clip: (low_pct, high_pct) for joint normalization.
+        gamma: optional gamma correction (1.0 = no correction).
+    """
+    A = _to_numpy(bev_pre_bchw)   # (B,C,H,W)
+    B_ = _to_numpy(bev_post_bchw)
+
+    if A.ndim != 4 or B_.ndim != 4:
+        raise ValueError(f"Expected [B,C,H,W], got {A.shape} and {B_.shape}")
+
+    _, Ca, H, W = A.shape
+    _, Cb, H2, W2 = B_.shape
+    if (H, W) != (H2, W2):
+        raise ValueError(f"Spatial mismatch: pre {H}×{W}, post {H2}×{W2}")
+
+    # channel-wise mean → (H, W)
+    ea = A[b].mean(axis=0)   # (H, W)
+    eb = B_[b].mean(axis=0)
+
+    if smooth_sigma > 0:
+        ea = _gaussian_blur_np(ea, sigma=smooth_sigma)
+        eb = _gaussian_blur_np(eb, sigma=smooth_sigma)
+
+    # joint percentile normalization so brightness is comparable
+    ea, eb = _percentile_norm_joint(ea, eb, p_low=joint_clip[0], p_high=joint_clip[1])
+
+    if gamma != 1.0:
+        ea = np.power(ea, gamma).astype(np.float32)
+        eb = np.power(eb, gamma).astype(np.float32)
+
+    imshow_kw = dict(
+        cmap=bev_cmap, vmin=0.0, vmax=1.0,
+        interpolation=bev_interp,
+        extent=bev_extent, origin=bev_origin,
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize, dpi=dpi,
+                             gridspec_kw={"wspace": 0.04})
+
+    for ax, img, label in zip(axes[:2], [ea, eb], labels[:2]):
+        ax.imshow(img, **imshow_kw)
+        ax.set_aspect("equal")
+        if bev_extent is not None:
+            ax.set_xlim(bev_extent[0], bev_extent[1])
+            ax.set_ylim(bev_extent[2], bev_extent[3])
+        ax.set_title(label, fontsize=11)
+        ax.axis("off")
+
+    ax_lidar = axes[2]
+    ax_lidar.set_title(labels[2], fontsize=11)
+    if (nusc is not None) and (sample_token is not None):
+        _draw_lidar_top_on_axes(
+            nusc, sample_token, ax_lidar,
+            view=lidar_view,
+            axes_limit=lidar_axes_limit,
+            show_boxes=lidar_show_boxes,
+            lidar_render_mode="scatter",
+            lidar_cmap="viridis",
+            pts_size=2.0,
+            pts_stride=1,
+            pts_alpha=0.9,
+            box_lw=0.6,
+            bev_extent=bev_extent,
+        )
+    else:
+        ax_lidar.text(0.5, 0.5, "LiDAR_TOP unavailable",
+                      ha="center", va="center", fontsize=10)
+        ax_lidar.axis("off")
+        ax_lidar.set_aspect("equal")
+
+    if title:
+        fig.suptitle(title, y=1.01, fontsize=12)
+
+    if out_dir is not None:
+        out_file = _ensure_outfile(out_dir, title or "channel_avg_triplet")
+        plt.savefig(out_file, bbox_inches="tight", pad_inches=0.05, dpi=dpi)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    return ea, eb
 
 
 def visualize_single_bev_pca_and_lidar(

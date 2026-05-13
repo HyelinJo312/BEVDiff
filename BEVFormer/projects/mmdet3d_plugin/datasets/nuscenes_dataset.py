@@ -19,6 +19,8 @@ from projects.mmdet3d_plugin.models.utils.visual import save_tensor
 from mmcv.parallel import DataContainer as DC
 import random
 import os
+from nuscenes import NuScenes
+from .utils import VectorizedLocalMap
 
 @DATASETS.register_module()
 class CustomNuScenesDataset(NuScenesDataset):
@@ -33,6 +35,25 @@ class CustomNuScenesDataset(NuScenesDataset):
         self.overlap_test = overlap_test
         self.bev_size = bev_size
         self.load_annos = load_annos
+        
+        # for vector maps
+        # self.map_dataroot = self.data_root
+
+        # map_xbound, map_ybound = grid_conf['xbound'], grid_conf['ybound']
+        # patch_h = map_ybound[1] - map_ybound[0]
+        # patch_w = map_xbound[1] - map_xbound[0]
+        # canvas_h = int(patch_h / map_ybound[2])
+        # canvas_w = int(patch_w / map_xbound[2])
+        # self.map_patch_size = (patch_h, patch_w)
+        # self.map_canvas_size = (canvas_h, canvas_w)
+
+        # # add seg label
+        # self.nusc = NuScenes(version='v1.0-trainval', dataroot=self.data_root, verbose=False)
+        # self.vector_map = VectorizedLocalMap(
+        #     dataroot=self.map_dataroot,
+        #     patch_size=self.map_patch_size,
+        #     canvas_size=self.map_canvas_size,
+        # )
         
     def prepare_train_data(self, index):
         """
@@ -88,6 +109,23 @@ class CustomNuScenesDataset(NuScenesDataset):
         queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
         queue = queue[-1]
         return queue
+
+    def get_map_ann_info(self, info):
+
+        # get the annotations of HD maps
+        vectors = self.vector_map.gen_vectorized_samples(
+            info['location'], info['ego2global_translation'], info['ego2global_rotation'])
+
+        # type0 = 'divider'
+        # type1 = 'pedestrain'
+        # type2 = 'boundary'
+
+        for vector in vectors:
+            pts = vector['pts']
+            vector['pts'] = np.concatenate(
+                (pts, np.zeros((pts.shape[0], 1))), axis=1)
+
+        return vectors
 
     def get_data_info(self, index):
         """Get data info according to the given index.
@@ -159,6 +197,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             annos = self.get_ann_info(index)
             input_dict['ann_info'] = annos
 
+        # input_dict['vectors'] = self.get_map_ann_info(info)
         rotation = Quaternion(input_dict['ego2global_rotation'])
         translation = input_dict['ego2global_translation']
         can_bus = input_dict['can_bus']

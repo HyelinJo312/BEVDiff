@@ -95,7 +95,7 @@ unet = dict(
                 use_key_padding_mask=False,
                 use_3d_bbox=use_3d_bbox),
             ),
-    )
+    ),
 )
 
 model = dict(

@@ -45,7 +45,7 @@ from mmdet.apis import set_random_seed
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from layout_diffusion.layout_dino_diffusion_unet_v2 import LayoutDiffusionUNetModel
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -181,7 +181,7 @@ def test():
     unet.requires_grad_(False) 
     unet.eval()
 
-    get_dino = GetDINOv2Cond()
+    get_dino = GetDINOV2Feat()
     
     bev_cfg.data.test.test_mode = True
     bev_cfg.data.test.load_annos = True
@@ -215,8 +215,7 @@ def test():
              noise_timesteps=args.noise_timesteps,
              denoise_timesteps=args.denoise_timesteps,
              num_inference_steps=args.num_inference_steps,
-             use_classifier_guidence=args.use_classifier_guidence,
-             inversion=args.inversion)
+             use_classifier_guidence=args.use_classifier_guidence,)
 
 
 def evaluate(unet,
@@ -231,8 +230,7 @@ def evaluate(unet,
              noise_timesteps=0,
              denoise_timesteps=0,
              num_inference_steps=0,
-             use_classifier_guidence=False,
-             inversion=False):
+             use_classifier_guidence=False):
     
     def get_classifier_gradient(x, **kwargs):
         x_ = x.detach().requires_grad_(True)
@@ -305,7 +303,6 @@ def evaluate(unet,
             uncond['last_tokens'] = last_tokens_u
             return uncond
         
-        
         if noise_timesteps > 0:
             if noise_timesteps > 1000:
                 latents = torch.randn_like(latents)
@@ -320,12 +317,13 @@ def evaluate(unet,
             cond, uncond = get_condition(batch, use_cond=True), get_condition(batch, use_cond=False)
             dino_cond = get_dino(img, img_metas)
             dino_uncond = get_dino_uncond(dino_cond)
+            
             noise_scheduler.config.num_train_timesteps=denoise_timesteps
             noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
         
             for _, t in enumerate(noise_scheduler.timesteps): # 5 -> 4 -> 3 -> 2 -> 1
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, dino_uncond, **uncond)[0], unet(latents, t_batch, dino_uncond, **cond)[0]
+                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, img_metas, dino_uncond, **uncond)[0], unet(latents, t_batch, img_metas, dino_cond, **cond)[0]
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]

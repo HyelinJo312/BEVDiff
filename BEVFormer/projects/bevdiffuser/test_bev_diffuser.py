@@ -45,7 +45,7 @@ from mmdet.apis import set_random_seed
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 logger = get_logger(__name__, log_level="INFO")
 

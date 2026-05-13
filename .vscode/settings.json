@@ -12,7 +12,8 @@
         "**/data",
         "**/results*",
         "**/build",
-        "**/mmdetection3d"
+        "**/mmdetection3d",
+        "**/pca_ckpts"
     ],
     "files.watcherExclude": {
         "**/.git/objects/**": true,
@@ -28,6 +29,9 @@
         "**/results/**": true,
         "**/assets/**": true,
         "**/depth_map/**": true,
+        "**/figures/**": true,
+        "**/__pycache__": true,
+        "**/pca_ckpts/**": true,
     },
     "search.exclude": {
         "**/node_modules": true,
@@ -43,6 +47,12 @@
         "**/results/**": true,
         "**/assets/**": true,
         "**/depth_map/**": true,
+        "**/figures/**": true,
+        "**/__pycache__": true,
+        "**/pca_ckpts/**": true,
     },
+    "env": {
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    }
 
 }

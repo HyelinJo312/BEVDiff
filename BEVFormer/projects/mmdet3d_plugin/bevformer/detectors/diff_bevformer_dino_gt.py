@@ -15,7 +15,7 @@ import mmdet3d
 from .bevformer import BEVFormer
 
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
 
 
 @DETECTORS.register_module()

@@ -69,13 +69,16 @@ def get_bev_model(args):
     fp16_cfg = cfg.get('fp16', None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
-    checkpoint = load_checkpoint(model, args.bev_checkpoint, map_location='cpu')
     
-    if 'CLASSES' in checkpoint.get('meta', {}):
-        model.CLASSES = checkpoint['meta']['CLASSES']
-        
-    if 'PALETTE' in checkpoint.get('meta', {}):
-        model.PALETTE = checkpoint['meta']['PALETTE']
+    if args.bev_checkpoint is not None:
+        checkpoint = load_checkpoint(model, args.bev_checkpoint, map_location='cpu')
+        if 'CLASSES' in checkpoint.get('meta', {}):
+            model.CLASSES = checkpoint['meta']['CLASSES']
+        if 'PALETTE' in checkpoint.get('meta', {}):
+            model.PALETTE = checkpoint['meta']['PALETTE']
+    else:
+        if cfg.get('class_names', None) is not None:
+            model.CLASSES = cfg.class_names
         
     if not distributed:
         model = MMDataParallel(model, device_ids=[0])
@@ -87,6 +90,34 @@ def get_bev_model(args):
             find_unused_parameters=True)
     model.eval()
     return model
+
+
+
+def get_bev_model_v2(args, cfg, use_dino_bev=True):
+    """
+    Build BEV model with optional DINOBevAligner as the BEV encoder.
+    Returns:
+        bev_model:    Wrapped BEVFormer (MMDataParallel / MMDistributedDataParallel),
+                      frozen and in eval mode. Used for decoder / task-loss only.
+        dino_aligner: DINOBevAligner on CUDA, or None when use_dino_bev=False.
+    """
+    bev_model = get_bev_model(args)
+
+    if use_dino_bev:
+        # BEVFormer encoder is fully bypassed by the given_bev interface.
+        # Delete it to free VRAM (backbone/neck are still needed for task-loss).
+        # inner = bev_model.module
+        # encoder = getattr(inner.pts_bbox_head.transformer, 'encoder', None)
+        # if encoder is not None:
+        #     # del inner.pts_bbox_head.transformer.encoder
+        #     # torch.cuda.empty_cache()
+        #     inner.pts_bbox_head.transformer.encoder = torch.nn.Identity()
+        dino_aligner = instantiate_from_config(cfg.dino_bev_aligner)
+        dino_aligner = dino_aligner.cuda()
+    else:
+        dino_aligner = None
+
+    return bev_model, dino_aligner
 
 
 
@@ -110,6 +141,20 @@ def build_unet(cfg):
         **model_kwargs,
     )
 
+
+
+def build_unet_v2(cfg):
+    def get_obj_from_str(string, reload=False):
+        module, cls = string.rsplit(".", 1)
+        if reload:
+            module_imp = importlib.import_module(module)
+            importlib.reload(module_imp)
+
+        return getattr(importlib.import_module(module, package=None), cls)
+
+    model_kwargs = dict(**cfg.parameters)
+    model_kwargs.pop('layout_encoder', None)
+    return get_obj_from_str(cfg.type)(**model_kwargs)
 
 
 def instantiate_from_config(cfg):

@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-GPUS=$1
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export NUMEXPR_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=1     # prevent OpenBLAS from spawning extra threads
+export OPENCV_NUM_THREADS=1       # let OpenCV auto-detect (0 = use OMP setting)
+export MAX_JOBS=8                 # 빌드 job 상한 (과도한 fork 방지)
+export TCNN_CUDA_ARCHITECTURES=86 # Ampere (A6000)
+
+# ── NCCL / inter-GPU communication ──────────────────────────────────────────
+export NCCL_IB_DISABLE=1          # no InfiniBand on this server
+# export NCCL_P2P_DISABLE=0         # GPU 0-3: 같은 NUMA node → NODE 토폴로지 P2P 활용
+# export NCCL_SOCKET_NTHREADS=4     # NUMA 격리 후 소켓 스레드 복원
+# export NCCL_NSOCKS_PERTHREAD=2    # 스레드당 소켓 수
+
+GPUS=4
 PORT=${PORT:-29503}
 
 BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
@@ -12,15 +26,15 @@ PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_BEVFormer_tiny_original
+RUN_NAME=BEVDiffuser_BEVFormer_tiny_original_bs4
 
 # checkpoint settings
 CHECKPOINT_STEP=10000
-CHECKPOINT_LIMIT=20
+CHECKPOINT_LIMIT=5
 
 # allow 500 extra steps to be safe
 MAX_TRAINING_STEPS=50000
-TRAIN_BATCH_SIZE=2
+TRAIN_BATCH_SIZE=4
 DATALOADER_NUM_WORKERS=4
 GRADIENT_ACCUMMULATION_STEPS=1
 
@@ -36,19 +50,13 @@ OUTPUT_DIR="../../../results/${RUN_NAME}"
 
 mkdir -p $OUTPUT_DIR
 
-export NCCL_SOCKET_IFNAME=lo
-export NCCL_P2P_DISABLE=1
-# export NCCL_IB_DISABLE=1
-# export NCCL_SHM_DISABLE=1
-export NCCL_DEBUG=INFO
-export NCCL_ASYNC_ERROR_HANDLING=1
-export PYTHONWARNINGS="ignore"
-
 # train!
 PYTHONPATH="$(dirname $0)/../..":$PYTHONPATH \
-# python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port=$PORT \
-torchrun --nproc_per_node=4 --master_port=29503 \
-  $(dirname "$0")/train_bev_diffuser_original.py \
+# taskset -c 16-31,48-63 torchrun \
+torchrun --nproc_per_node $GPUS \
+    --nproc_per_node $GPUS \
+    --master_port=29505 \
+  $(dirname "$0")/train_bev_diffuser.py \
     --bev_config $BEV_CONFIG \
     --bev_checkpoint $BEV_CHECKPOINT \
     --pretrained_unet_checkpoint $PRETRAINED_UNET_CHECKPOINT \

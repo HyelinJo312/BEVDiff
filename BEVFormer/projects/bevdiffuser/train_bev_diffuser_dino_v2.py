@@ -32,7 +32,7 @@ import diffusers
 import importlib
 
 from tqdm.auto import tqdm
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
@@ -52,15 +52,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))+"/..
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from mmdet.apis import set_random_seed
 
-from layout_diffusion.layout_diffusion_unet import LayoutDiffusionUNetModel
+from layout_diffusion.layout_dino_diffusion_unet_v3 import LayoutDiffusionUNetModel
 from ldm.modules.diffusionmodules.openaimodel import UNetModel
 from scheduler_utils import DDIMGuidedScheduler
 from model_utils import get_bev_model, build_unet, instantiate_from_config
 from test_bev_diffuser_dino_v2 import evaluate
 from torch.utils.tensorboard import SummaryWriter
-from projects.bevdiffuser.fm_feature import GetDINOv2Cond, GetDINOv2, GetDINOv2CondV2
-from projects.bevdiffuser.multiscale_concat import MultiScaleConcat
-from projects.bevdiffuser.load_depth import LoadDepth
+from projects.bevdiffuser.fm_feature import GetDINOV2Feat
+
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -76,11 +75,13 @@ def train():
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
+    # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=None,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        # kwargs_handlers=[ddp_kwargs],
     )
 
     # Make one log on every process with the configuration for debugging.
@@ -146,7 +147,7 @@ def train():
         loss, _ = bev_model.module._parse_losses(losses)
         return loss
     
-    unet = instantiate_from_config(bev_cfg.unet)
+    unet = build_unet(bev_cfg.unet)
     if args.pretrained_unet_checkpoint is not None and (os.path.isfile(args.pretrained_unet_checkpoint) or os.path.isdir(args.pretrained_unet_checkpoint)):
         unet.from_pretrained(args.pretrained_unet_checkpoint, subfolder="unet")
         # train only the downsample and upsample layers
@@ -155,8 +156,7 @@ def train():
         unet.upsample_blocks.requires_grad_(True)
         
     # Get DINOv2 feature extractor
-    get_dino = GetDINOv2Cond()
-    get_depth = LoadDepth()
+    get_dino = GetDINOV2Feat(device=accelerator.device)
     
 
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
@@ -211,6 +211,8 @@ def train():
                                           'use_3d_bbox': bev_cfg.use_3d_bbox,
                                           'num_classes': bev_cfg.num_classes,
                                           'num_bboxes': bev_cfg.num_bboxes,
+                                          'use_layout': bev_cfg.use_layout,
+                                          'use_semantics': bev_cfg.use_semantics,
                                       })
         
         bev_cfg.data.test.load_annos = True
@@ -220,6 +222,8 @@ def train():
                                         'use_3d_bbox': bev_cfg.use_3d_bbox,
                                         'num_classes': bev_cfg.num_classes,
                                         'num_bboxes': bev_cfg.num_bboxes,
+                                        'use_layout': bev_cfg.use_layout,
+                                        'use_semantics': bev_cfg.use_semantics,
                                     })
         
       
@@ -243,7 +247,36 @@ def train():
         shuffle=False,
         nonshuffler_sampler=bev_cfg.data.nonshuffler_sampler,
     )
-    
+    def get_condition(batch):
+        cond = {}
+        
+        if 'layout_obj_classes' in batch:
+            cond['obj_class'] = torch.stack(batch['layout_obj_classes'].data[0])
+        if 'layout_obj_bboxes' in batch:
+            cond['obj_bbox'] = torch.stack(batch['layout_obj_bboxes'].data[0])
+        if 'layout_obj_is_valid' in batch:
+            cond['is_valid_obj'] = torch.stack(batch['layout_obj_is_valid'].data[0]) 
+        if 'layout_obj_names' in batch:
+            cond['obj_name'] = torch.stack(batch['layout_obj_names'].data[0])
+        
+        if np.random.rand() < args.uncond_prob:
+            if isinstance(unet.module, LayoutDiffusionUNetModel):
+                if 'obj_class' in unet.module.layout_encoder.used_condition_types:
+                    cond['obj_class'] = torch.ones_like(cond['obj_class']).fill_(unet.module.layout_encoder.num_classes_for_layout_object - 1)
+                    cond['obj_class'][:, 0] = unet.module.layout_encoder.num_classes_for_layout_object - 2
+                if 'obj_name' in unet.module.layout_encoder.used_condition_types:
+                    cond['obj_name'] = torch.stack(batch['default_obj_names'].data[0])
+                if 'obj_bbox' in unet.module.layout_encoder.used_condition_types:
+                    cond['obj_bbox'] = torch.zeros_like(cond['obj_bbox'])
+                    if unet.module.layout_encoder.use_3d_bbox:
+                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 0, 1, 1, 1, 0, 0, 0])
+                    else:
+                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 1, 1])
+                cond['is_valid_obj'] = torch.zeros_like(cond['is_valid_obj'])
+                cond['is_valid_obj'][:, 0] = 1.0  
+                 
+        return cond
+
     def get_dino_cond(dino_out):
         if np.random.rand() < args.uncond_prob:
             uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
@@ -257,7 +290,13 @@ def train():
             cond = dino_out
         return cond
 
-    
+    def get_segmaps_cond(segmaps):
+        if np.random.rand() < args.uncond_prob:
+            cond = torch.zeros_like(segmaps)
+        else:
+            cond = segmaps
+        return cond
+
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
@@ -309,7 +348,6 @@ def train():
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num dataloader = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Num update steps per epoch = {num_update_steps_per_epoch}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
@@ -339,7 +377,7 @@ def train():
         step_cnt = global_step * args.gradient_accumulation_steps
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=140)
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -353,14 +391,6 @@ def train():
                 continue
 
             with accelerator.accumulate(unet):
-                # Get condition
-                img = batch['img'].data[0]
-                len_queue = img.size(1)
-                img = img[:, -1, ...]
-                img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
-                dino_out = get_dino(img, img_metas)
-                dino_cond = get_dino_cond(dino_out)
-                
                 # Get BEV
                 with torch.no_grad():
                     latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
@@ -387,9 +417,24 @@ def train():
                     target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                                         
+                # Get condition
+                imgs = batch['img'].data[0]
+                len_queue = imgs.size(1)
+                img = imgs[:, -1, ...]
+                img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
+                
+                cond = get_condition(batch)
+                
+                dino_out = get_dino(img, img_metas)
+                dino_cond = get_dino_cond(dino_out)
+
+                # Segmentation maps (optional)
+                seg_maps = torch.stack(batch['seg_maps'].data[0], dim=0)
+                seg_cond = get_segmaps_cond(seg_maps)
                 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_latents, timesteps, dino_cond)[0]
+                model_pred = unet(noisy_latents, timesteps, img_metas, dino_cond, seg_cond, **cond)[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -473,7 +518,7 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step in [10000, 30000, 50000]:
+                    if global_step % args.checkpointing_steps == 0 and global_step > 10000:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')

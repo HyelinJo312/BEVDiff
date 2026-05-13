@@ -54,20 +54,17 @@ class EmbeddingAdapter(nn.Module):
         return texts
 
     
-class GetDINOv2Cond(nn.Module):
+class GetDINOV2Feat(nn.Module):
     def __init__(
         self,
         encoder: str = 'vitb',     # ['vits', 'vitb', 'vitl'] → small/base/large
-        features: int = 256,       # output dim for BEVDiffuser conditioning
         device: str = 'cuda',
         patch: int = 14,
-        input_size: int = 518,     
         symmetric_pad: bool = True,
     ):
         super().__init__()
         assert encoder in ['vits', 'vitb', 'vitl']
         self.device = device
-        self.input_min = input_size
         self.patch = patch
         self.symmetric_pad = symmetric_pad
 
@@ -82,26 +79,18 @@ class GetDINOv2Cond(nn.Module):
 
     def image_preprocess(self, x):
         """
-        x: (N, 3, H, W) float tensor in [0,1] or [0,255]
-        -> (x_norm: (N, 3, H2, W2) on self.device, ImageNet normalized,
-            Hp, Wp: patch grid size = (H2//patch, W2//patch))
+        x: (N, 3, H, W) float tensor
+        Pads H and W up to the nearest multiple of `patch` without upscaling.
+        Returns (x_padded, Hp, Wp, extra_geom) with scale=1.0.
         """
         assert x.ndim == 4 and x.shape[1] == 3, f"Expected (N,3,H,W), got {x.shape}"
         x = x.to(dtype=torch.float32)
-        # if x.max() > 1.5:      # likely [0,255]
-        #     x = x / 255.0
-        # x = x.clamp_(0.0, 1.0)
 
         N, C, H, W = x.shape
-        # keep aspect ration: min(H1, W1) >= input_min
-        scale = max(self.input_min / H, self.input_min / W)
-        H1, W1 = int(round(H * scale)), int(round(W * scale))
 
-        x = F.interpolate(x, size=(H1, W1), mode='bicubic', align_corners=False)
-        
-        H2 = (H1 + self.patch - 1) // self.patch * self.patch
-        W2 = (W1 + self.patch - 1) // self.patch * self.patch
-        pad_h, pad_w = H2 - H1, W2 - W1
+        H2 = (H + self.patch - 1) // self.patch * self.patch
+        W2 = (W + self.patch - 1) // self.patch * self.patch
+        pad_h, pad_w = H2 - H, W2 - W
 
         if self.symmetric_pad:
             top = pad_h // 2; bottom = pad_h - top
@@ -111,9 +100,9 @@ class GetDINOv2Cond(nn.Module):
 
         x = F.pad(x, (left, right, top, bottom), mode='replicate')
         x = x.to(self.device, non_blocking=True)
-        
+
         extra_geom = {
-            'scale': scale,
+            'scale': 1.0,
             'H2W2': (H2, W2),
             'padding': (top, left),
             'patch_size': self.patch,
@@ -124,48 +113,52 @@ class GetDINOv2Cond(nn.Module):
     
     def forward(self, images, img_metas, n_layers=4):
         """
-        images: (B, 6, C, H, W) or (6, C, H, W) when bs=1
+        images: supports multiple input shapes —
+            6D: (B, T, V, C, H, W)  — multiple key frames per sample
+            5D: (B, V, C, H, W)     — single key frame (T=1)
+        When 6D input is given, T key frames are flattened into the view
+        dimension (V_total = T * V) for DINOv2 processing, then the output
+        is reshaped back to (B, T*V, …).
         """
         if not isinstance(images, torch.Tensor):
             raise TypeError("images must be a torch.Tensor")
 
-        if images.ndim == 5:
+        if images.ndim == 6:
+            # (B, T, V, C, H, W) — multiple key frames
+            B, T, V, C, H, W = images.shape
+            V_total = T * V
+            x = images.reshape(B * V_total, C, H, W).contiguous()
+        elif images.ndim == 5:
             B, V, C, H, W = images.shape
-            x = images.reshape(B * V, C, H, W).contiguous()
-        elif images.ndim == 4:
-            V, C, H, W = images.shape
-            B  = 1
-            x = images.reshape(B * V, C, H, W).contiguous()
+            T = 1
+            V_total = V
+            x = images.reshape(B * V_total, C, H, W).contiguous()
         else:
             raise ValueError(f"Unexpected tensor shape: {images.shape}")
         
         x, Hp, Wp, extra_geom = self.image_preprocess(x)
 
-        # Dinov2 forward
+        # Dinov2 forward  
         with torch.no_grad():
-            outputs = self.model(pixel_values=x, output_hidden_states=True)
-        hidden_states = outputs.hidden_states
-        hs_selected = hidden_states[-n_layers:] if n_layers > 0 else [hidden_states[-1]]
-        
-        feats_out = []
-        cls_out = []
-        for h in hs_selected:
-            cls_tok = h[:, 0]          # (B*V, C_dino)
-            tok    = h[:, 1:]          # (B*V, Hp*Wp, C_dino)
-            # tok = h[:, 1:, :] 
-            cls_tok = cls_tok.view(B, V, self.hidden_dim)                  # (B,V,C)
-            tok_seq = tok.view(B, V, Hp * Wp, self.hidden_dim)             # (B,V,N,C)
-            feats_out.append(tok_seq)
-            cls_out.append(cls_tok)
+            outputs = self.model(pixel_values=x, output_hidden_states=False)
 
-        last_tok, last_cls = feats_out[-1], cls_out[-1]
+        h = outputs.last_hidden_state                                        # (B*V_total, 1+Hp*Wp, C_dino)
+        last_cls    = h[:, 0].view(B, T, V, self.hidden_dim)                 # (B, T, V, C)
+        # h[:,1:] is (B*V_total, Hp*Wp, C_dino) — spatial-first in memory.
+        # Must reshape spatial dims before moving channel to front.
+        last_tokens = (h[:, 1:]
+                       .view(B * V_total, Hp, Wp, self.hidden_dim)   # (B*V_total, Hp, Wp, C)
+                       .permute(0, 3, 1, 2)                          # (B*V_total, C, Hp, Wp)
+                       .contiguous()
+                       .view(B, T, V, self.hidden_dim, Hp, Wp))      # (B, T, V, C, Hp, Wp)
         
         return {
             'feature_type': 'dinov2',
-            'features': feats_out,          # list[(B,V,N,C),(B,V,C)]
             'patch_hw': (Hp, Wp),
-            'last_cls': last_cls,           # (B, V, C) 
-            'last_tokens': last_tok,        # (B, V, N, C) 37 * 62
+            'last_cls': last_cls,           # (B, T, V, C)
+            'last_tokens': last_tokens,     # (B, T, V, C, Hp, Wp)
+            'num_key_frames': T,
+            'num_views': V,
             'img_metas': img_metas,
             'geom': extra_geom
         }
@@ -287,139 +280,6 @@ class GetDINOv2CondV2(nn.Module):
             'last_tokens': last_tok,        # (B, V, N, C) N=35*58=2030
             'img_metas': img_metas,
             'geom': extra_geom              
-        }
-
-class GetDINOv2(nn.Module):
-    """
-    Extract DINOv2 features from raw images 1600*900
-    """
-    def __init__(
-        self,
-        encoder: str = 'vitb',
-        device: str = 'cuda',
-        patch: int = 14,
-        input_min: int = 518,
-        symmetric_pad: bool = True,
-    ):
-        super().__init__()
-        assert encoder in ['vits', 'vitb', 'vitl']
-        self.device = device
-        self.patch = patch
-        self.input_min = input_min
-        self.symmetric_pad = symmetric_pad
-
-        self.model = AutoModel.from_pretrained('facebook/dinov2-base').to(self.device)
-        self.model.requires_grad_(False)
-        self.model.eval()
-
-        self.hidden_dim = self.model.config.hidden_size
-
-    def _preprocess_raw(self, imgs_raw_np):
-        # (N, H_raw, W_raw, 3) → (N,3,H_raw,W_raw)
-        x = torch.from_numpy(
-            np.stack([im.transpose(2,0,1) for im in imgs_raw_np], axis=0)
-        ).float()  # (N,3,H_raw,W_raw)
-
-        x = x / 255.0
-        x = x.clamp_(0.0, 1.0)
-
-        N, C, H_raw, W_raw = x.shape
-
-        # aspect ratio 유지: min(H1,W1) >= input_min
-        scale_raw = max(self.input_min / H_raw, self.input_min / W_raw)
-        H1 = int(round(H_raw * scale_raw))
-        W1 = int(round(W_raw * scale_raw))
-
-        x = F.interpolate(x, size=(H1, W1), mode='bicubic', align_corners=False)
-        
-        H2 = (H1 + self.patch - 1) // self.patch * self.patch
-        W2 = (W1 + self.patch - 1) // self.patch * self.patch
-        pad_h, pad_w = H2 - H1, W2 - W1
-
-        if self.symmetric_pad:
-            top = pad_h // 2; bottom = pad_h - top
-            left = pad_w // 2; right = pad_w - left
-        else:
-            top = 0; bottom = pad_h
-            left = 0; right = pad_w
-
-        x = F.pad(x, (left, right, top, bottom), mode='replicate')
-        x = x.to(self.device, non_blocking=True)
-
-        Hp, Wp = H2 // self.patch, W2 // self.patch
-        geom_raw = {
-            'scale_raw': scale_raw,
-            'H2W2': (H2, W2),
-            'padding_raw': (top, left),
-            'patch_size': self.patch,
-            'H_rawW_raw': (H_raw, W_raw),
-        }
-        return x, Hp, Wp, geom_raw
-
-    @torch.no_grad()
-    def forward(self, images, img_metas, n_layers=4):
-        B, V, C, H_img, W_img = images.shape
-
-        raw_imgs = []
-        for b in range(B):
-            meta = img_metas[b]
-            filenames = meta['filename']
-            if isinstance(filenames, (str, os.PathLike)):
-                filenames = [filenames]
-            assert len(filenames) == V
-            for v in range(V):
-                path = filenames[v]
-                img_bgr = cv2.imread(path, cv2.IMREAD_COLOR)
-                if img_bgr is None:
-                    raise FileNotFoundError(path)
-                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                raw_imgs.append(img_rgb)
-
-        x, Hp, Wp, geom_raw = self._preprocess_raw(raw_imgs)  # (B*V,3,H2,W2)
-        H2, W2 = geom_raw['H2W2']
-        scale_raw = geom_raw['scale_raw']
-        pad_top_raw, pad_left_raw = geom_raw['padding_raw']
-
-        scale_factor = img_metas[0]['scale_factor']
-        if isinstance(scale_factor, (list, tuple, np.ndarray)):
-            scale_m = float(scale_factor[0])  # 여기서는 0.5
-        else:
-            scale_m = float(scale_factor)
-
-        effective_scale = scale_raw / scale_m
-
-        extra_geom = {
-            'scale': effective_scale,       
-            'H2W2': (H2, W2),
-            'padding': (pad_top_raw, pad_left_raw),
-            'patch_size': self.patch,
-        }
-
-        outputs = self.model(pixel_values=x, output_hidden_states=True)
-        hidden_states = outputs.hidden_states
-        hs_selected = hidden_states[-n_layers:] if n_layers > 0 else [hidden_states[-1]]
-
-        feats_out, cls_out = [], []
-        for h in hs_selected:
-            cls_tok = h[:, 0]        # (B*V, C)
-            tok    = h[:, 1:]        # (B*V, Hp*Wp, C)
-
-            cls_tok = cls_tok.view(B, V, self.hidden_dim)              # (B,V,C)
-            tok_seq = tok.view(B, V, Hp * Wp, self.hidden_dim)         # (B,V,N,C)
-
-            feats_out.append(tok_seq)
-            cls_out.append(cls_tok)
-
-        last_tok, last_cls = feats_out[-1], cls_out[-1]
-
-        return {
-            'feature_type': 'dinov2',
-            'features': feats_out,        # list[(B,V,N,C)]
-            'patch_hw': (Hp, Wp),
-            'last_cls': last_cls,         # (B,V,C)
-            'last_tokens': last_tok,      # (B,V,N,C)
-            'img_metas': img_metas,
-            'geom': extra_geom,          
         }
 
 
