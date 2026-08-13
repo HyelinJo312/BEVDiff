@@ -213,7 +213,9 @@ def main():
             dict(type="WandbLoggerHook",
                  init_kwargs=dict(project=args.tracker_project_name,
                                   name=args.tracker_run_name,
-                                  id=args.tracker_run_name,))
+                                #   id=args.tracker_run_name,
+                                  )
+                 )
         )
         print(args.tracker_run_name)
 

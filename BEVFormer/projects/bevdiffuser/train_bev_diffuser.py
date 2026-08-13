@@ -322,7 +322,8 @@ def train():
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Is SD21: {is_training_sd21}")
-
+    logger.info(f'[LayoutEncoder] Class names: {bev_cfg.total_class}') 
+    
     global_step = 0
     first_epoch = 0
     step_cnt = 0
@@ -344,7 +345,7 @@ def train():
         step_cnt = global_step * args.gradient_accumulation_steps
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=140)
+    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=120)
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -474,7 +475,7 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step % args.checkpointing_steps == 0:
+                    if global_step % args.checkpointing_steps == 0 and global_step > 30000:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')

@@ -130,8 +130,8 @@ bev_diffuser_cfg=dict(
     unet_checkpoint_dir=None,
     pretrained_model_name_or_path="stabilityai/stable-diffusion-2-1",
     prediction_type="sample",
-    noise_timesteps=100,
-    denoise_timesteps=100,
+    noise_timesteps=5,
+    denoise_timesteps=5,
     num_inference_steps=5,
     use_classifier_guidence=False)
 
@@ -266,8 +266,8 @@ dataset_type = 'CustomNuScenesDiffusionDataset_layout_seg'
 # data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/'
 # info_root = "/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/" # bevformer info
 # data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/'
-# data_root = 'data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+data_root = 'data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 

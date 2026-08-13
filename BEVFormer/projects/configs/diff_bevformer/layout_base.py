@@ -41,7 +41,7 @@ num_classes = len(class_names) + 2
 use_3d_bbox = True
 
 unet = dict(
-    type='projects.bev_diffuser.layout_diffusion.layout_diffusion_unet.LayoutDiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.layout_diffusion_unet.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -64,7 +64,7 @@ unet = dict(
         use_positional_embedding_for_attention=True,
         attention_block_type='ObjectAwareCrossAttention',
         layout_encoder=dict(
-            type='projects.bev_diffuser.layout_diffusion.layout_encoder.LayoutTransformerEncoder',
+            type='projects.bevdiffuser.layout_diffusion.layout_encoder.LayoutTransformerEncoder',
             parameters=dict(
                 used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
                 layout_length=num_bboxes,
@@ -88,7 +88,7 @@ bev_diffuser_cfg=dict(
     unet_checkpoint_dir=None,
     pretrained_model_name_or_path="stabilityai/stable-diffusion-2-1",
     prediction_type="sample",
-    noise_timesteps=0,
+    noise_timesteps=5,
     denoise_timesteps=5,
     num_inference_steps=5,
     use_classifier_guidence=False)
@@ -223,6 +223,7 @@ model = dict(
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
 data_root = 'data/nuscenes/'
+info_root = './ckpts/'
 file_client_args = dict(backend='disk')
 
 
@@ -257,8 +258,9 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=2,
+    samples_per_gpu=1,
     workers_per_gpu=4,
+    persistent_workers=True,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -305,7 +307,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=4, pipeline=test_pipeline)
+evaluation = dict(interval=12, pipeline=test_pipeline)
 
 runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
 # load_from = 'ckpts/r101_dcn_fcos3d_pretrain.pth'
@@ -316,7 +318,7 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=12)
 
 custom_hooks = [
     dict(type='UpdateTarget', epoch_interval=0)

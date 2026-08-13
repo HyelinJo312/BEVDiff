@@ -138,6 +138,8 @@ test/
 val/
 results/
 results
+visualize/
+visualize
 wandb/
 work_dirs/
 figures/
@@ -152,6 +154,7 @@ checkpoint-*/
 /depth_map
 /figures
 /results
+/visualize
 /data
 /ckpts
 
@@ -173,3 +176,6 @@ checkpoint-*/
 *.tfevents.*
 events.out.tfevents.*
 *.wandb
+
+# ===== Experiment output artifacts (plots, etc.) =====
+BEVFormer/tools/*.pdf

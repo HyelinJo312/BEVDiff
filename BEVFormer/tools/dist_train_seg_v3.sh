@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -12,17 +12,17 @@ export TCNN_CUDA_ARCHITECTURES=86 # Ampere (A6000)
 GPUS=$1
 PORT=${PORT:-28508}
 
-CONFIG="./projects/configs/diff_bevformer/layout_tiny_seg_v4_proj2.py"
-UNET_CHECKPOINT_DIR="../results/version2/stage1/BEVDiffuser_tiny_seg_one-hot_v11/checkpoint-50000"
+CONFIG="./projects/configs/diff_bevformer/layout_tiny_seg_v4_2.py"
+UNET_CHECKPOINT_DIR="../results/version2/stage1/BEVDiffuser_tiny_seg_one-hot_ablation_FDN/checkpoint-50000"
 LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
 RESUME_FROM="None"
-RUN_NAME="DiffBEVFormer_tiny_seg_v15"
+RUN_NAME="DiffBEVFormer_tiny_seg_FDN_no-mgd"
 WORK_DIR="../results/version2/stage2"
 
 # export PYTHONWARNINGS="ignore"
 
 PYTHONPATH="$(dirname $0)/..":$PYTHONPATH \
-# python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port=$PORT \
+# python -m torch.distributed.launch --nproc_er_node=$GPUS --master_port=$PORT \
 torchrun --nproc_per_node=4 --master_port=29505 \
     $(dirname "$0")/train_seg.py $CONFIG \
     --launcher pytorch ${@:3} \

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 # from transformers import CLIPTextModel, CLIPTokenizer
 # from diffusers import UNet2DConditionModel
-from projects.bevdiffuser.model_utils import build_unet, instantiate_from_config
+from projects.bevdiffuser.model_utils import build_unet_v2, instantiate_from_config
 from projects.bevdiffuser.scheduler_utils import DDIMGuidedScheduler
 
 
@@ -27,8 +27,7 @@ class BEVDiffuser(nn.Module):
         if prediction_type is not None:
             self.noise_scheduler.register_to_config(prediction_type=prediction_type)
                     
-        
-        self.unet = instantiate_from_config(unet_cfg)
+        self.unet = build_unet_v2(unet_cfg)
         assert unet_checkpoint_dir is not None
         self.unet.from_pretrained(unet_checkpoint_dir, subfolder="unet")
         self.unet.requires_grad_(False)
@@ -42,40 +41,49 @@ class BEVDiffuser(nn.Module):
         if self.denoise_timesteps is None:
             self.auto_denoise_timesteps = True
             
-    def get_dino_uncond(self, cond):
-        uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                    for k, v in cond.items()}
-        last_cls_u = torch.zeros_like(cond['last_cls'])  # (B,V,C_in)
-        last_tokens_u = torch.zeros_like(cond['last_tokens'])  # (B,V,N,C_in)
-        uncond['last_cls'] = last_cls_u
-        uncond['last_tokens'] = last_tokens_u
+    def get_uncondition(self, cond):
+        uncond = {}
+        if 'obj_class' in self.unet.layout_encoder.used_condition_types:
+            uncond['obj_class'] = torch.ones_like(cond['obj_class']).fill_(self.unet.layout_encoder.num_classes_for_layout_object - 1)
+            uncond['obj_class'][:, 0] = self.unet.layout_encoder.num_classes_for_layout_object - 2
+        if 'obj_name' in self.unet.layout_encoder.used_condition_types:
+            uncond['obj_name'] = cond['default_obj_names']
+        if 'obj_bbox' in self.unet.layout_encoder.used_condition_types:
+            uncond['obj_bbox'] = torch.zeros_like(cond['obj_bbox'])
+            if self.unet.layout_encoder.use_3d_bbox:
+                uncond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 0, 1, 1, 1, 0, 0, 0])
+            else:
+                uncond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 1, 1])
+        uncond['is_valid_obj'] = torch.zeros_like(cond['is_valid_obj'])
+        uncond['is_valid_obj'][:, 0] = 1.0 
         return uncond
         
-        
-    def forward(self, x, condition=None, grad_fn=None): 
-        
-        cond = condition
-        uncond = self.get_dino_uncond(condition)
-        
+    def get_segmaps_uncond(self, seg_cond):
+        uncond = torch.zeros_like(seg_cond)
+        return uncond
+
+    def forward(self, x, img_metas, segmaps=None, depth_maps=None, grad_fn=None): 
         if self.noise_timesteps > 0:
             noise = torch.randn_like(x)
             noise_timesteps = torch.tensor(self.noise_timesteps).long()
             x = self.noise_scheduler.add_noise(x, noise, noise_timesteps)
             
         if self.denoise_timesteps > 0:
+            seg_cond, seg_uncond = segmaps, self.get_segmaps_uncond(segmaps)
+
+            # seg conditioning does not depend on t: project once, reuse every step
+            seg_bev_cond = self.unet.encode_seg(seg_cond, img_metas, depth_maps=depth_maps)
+            seg_bev_uncond = self.unet.encode_seg(seg_uncond, img_metas, depth_maps=depth_maps)
+
             self.noise_scheduler.config.num_train_timesteps=self.denoise_timesteps
             self.noise_scheduler.set_timesteps(num_inference_steps=self.num_inference_steps)
+
             for _, t in enumerate(self.noise_scheduler.timesteps):
                 t_batch = torch.tensor([t] * x.shape[0], device=x.device)
-                noise_pred_uncond, noise_pred_cond = self.unet(x, t_batch, **uncond)[0], self.unet(x, t_batch, **cond)[0]
-                noise_pred = noise_pred_uncond + 2.0 * (noise_pred_cond - noise_pred_uncond)
+                noise_pred_uncond = self.unet(x, t_batch, img_metas, None, depth_maps=depth_maps, seg_bev_maps=seg_bev_uncond)
+                noise_pred_cond = self.unet(x, t_batch, img_metas, None, depth_maps=depth_maps, seg_bev_maps=seg_bev_cond)
+                noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = grad_fn(x) if self.use_classifier_guidence and grad_fn else None # self.use_classifier_guidence=False
                 x = self.noise_scheduler.step(noise_pred, t, x, return_dict=False, classifier_gradient=classifier_gradient)[0] 
             
-            return x
-        
-        else:
-            timestep = torch.tensor([10] * x.shape[0], device=x.device)  
-            multi_feat = self.unet(x, timestep, **cond)[1]  
-        
-            return multi_feat
+        return x

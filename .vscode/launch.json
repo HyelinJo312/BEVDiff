@@ -16,8 +16,9 @@
             "console": "integratedTerminal",
             "args": [
         
-                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_seg_v4.py",
+                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny_seg_v4_sam.py",
                     // "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny.py", 
+                // "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--pretrained_unet_checkpoint", "None",
                 "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-2-1",
@@ -94,16 +95,16 @@
             "request": "launch",
             //"module": "torch.distributed.launch",
             //"justMyCode": true,
-            "program": "${workspaceFolder}/BEVFormer/tools/train_seg.py",
+            "program": "${workspaceFolder}/BEVFormer/tools/train_dino.py",
             "console": "integratedTerminal",
             "args": [
-                "${workspaceFolder}/BEVFormer/projects/configs/diff_bevformer/layout_tiny_seg_v4_adapter.py",
+                "${workspaceFolder}/BEVFormer/projects/configs/diff_bevformer/bev_tiny_dino_seg.py",
                 // "--launcher", "None",
                 "--deterministic",
                 "--work_dir", "${workspaceFolder}/results_debug",
                 "--tracker_project_name", "DiffBEVFormer_debug",
                 "--tracker_run_name", "BEVFormer_tiny_with_BEVDiffuser_debug", 
-                "--unet_checkpoint_dir", "${workspaceFolder}/results/version2/stage1/BEVDiffuser_tiny_seg_one-hot_v11/checkpoint-50000",
+                "--unet_checkpoint_dir", "${workspaceFolder}/results/version2/stage1/BEVDiffuser_tiny_dinoseg_v1/checkpoint-50000",
                 "--load_from", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
                 "--resume_from", "None",
                 "--report_to", "tensorboard"
@@ -198,7 +199,7 @@
 
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "6",
                 "RANK": "0",
                 "LOCAL_RANK": "0",
                 "WORLD_SIZE": "1",

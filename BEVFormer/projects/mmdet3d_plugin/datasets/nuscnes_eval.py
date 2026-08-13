@@ -436,6 +436,82 @@ def filter_by_sample_token(ori_eval_boxes, valid_sample_tokens=[],  verbose=Fals
     return eval_boxes
 
 
+# Scene-condition splits, keyed over a lowercased nuScenes scene `description`.
+# 'sunny/rainy' and 'day/night' are two independent partitions of the val set
+# (sunny + rainy == day + night == full set), so a sample belongs to exactly
+# one of {sunny, rainy} and one of {day, night}.
+SCENE_CONDITIONS = {
+    "sunny": lambda d: "rain" not in d,
+    "rainy": lambda d: "rain" in d,
+    "day":   lambda d: "night" not in d,
+    "night": lambda d: "night" in d,
+}
+
+
+def evaluate_by_scene_condition(nusc_eval, nusc, result_path="", print_table=True):
+    """Re-evaluate an already-built NuScenesEval_custom on scene-condition subsets.
+
+    Predictions are condition-independent, so this does NOT re-run inference: it
+    reuses ``nusc_eval.all_gt`` / ``nusc_eval.all_preds`` (set in __init__) and
+    filters them per condition via :func:`filter_by_sample_token`.
+
+    Args:
+        nusc_eval (NuScenesEval_custom): an instance whose __init__ has already
+            loaded predictions + GT (``all_gt`` / ``all_preds`` populated).
+        nusc (NuScenes): the NuScenes handle used to read scene descriptions.
+        result_path (str): only used for the printed header.
+        print_table (bool): whether to print the summary table to stdout.
+
+    Returns:
+        list[tuple]: (condition_name, num_samples, mAP, NDS) rows, with an
+        ``"overall"`` row first.
+    """
+    all_tokens = list(nusc_eval.all_gt.sample_tokens)
+
+    # Map each evaluated sample token -> lowercased scene description.
+    desc = {}
+    for token in all_tokens:
+        sample = nusc.get("sample", token)
+        scene = nusc.get("scene", sample["scene_token"])
+        desc[token] = scene["description"].lower()
+
+    rows = []
+    splits = [("overall", lambda d: True)] + list(SCENE_CONDITIONS.items())
+    for name, predicate in splits:
+        valid = [t for t in all_tokens if predicate(desc[t])]
+        print(f"[eval] {name}: {len(valid)} samples ...", flush=True)
+        if len(valid) == 0:
+            rows.append((name, 0, float("nan"), float("nan")))
+            continue
+
+        nusc_eval.gt_boxes = filter_by_sample_token(nusc_eval.all_gt, valid)
+        nusc_eval.pred_boxes = filter_by_sample_token(nusc_eval.all_preds, valid)
+        nusc_eval.sample_tokens = nusc_eval.gt_boxes.sample_tokens
+
+        metrics, _ = nusc_eval.evaluate()
+        summary = metrics.serialize()
+        print(
+            f"[eval] {name}: mAP={summary['mean_ap']:.4f} "
+            f"NDS={summary['nd_score']:.4f}",
+            flush=True,
+        )
+        rows.append((name, len(valid), summary["mean_ap"], summary["nd_score"]))
+
+    if print_table:
+        print("\n" + "=" * 56)
+        print("Per-condition nuScenes evaluation")
+        if result_path:
+            print(f"result: {result_path}")
+        print("=" * 56)
+        print(f"{'condition':<10}{'#samples':>10}{'mAP':>12}{'NDS':>12}")
+        print("-" * 56)
+        for name, n, mAP, nds in rows:
+            print(f"{name:<10}{n:>10}{mAP:>12.4f}{nds:>12.4f}")
+        print("=" * 56, flush=True)
+
+    return rows
+
+
 def filter_eval_boxes_by_overlap(nusc: NuScenes,
                                  eval_boxes: EvalBoxes,
                                  verbose: bool = False) -> EvalBoxes:

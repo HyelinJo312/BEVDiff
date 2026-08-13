@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -12,11 +12,11 @@ export TCNN_CUDA_ARCHITECTURES=86 # Ampere (A6000)
 GPUS=$1
 PORT=${PORT:-28508}
 
-CONFIG="./projects/configs/diff_bevformer/layout_tiny_seg_v4_proj_fgmask.py"
+CONFIG="./projects/configs/diff_bevformer/layout_tiny_seg_v4_proj_bboxw.py"
 UNET_CHECKPOINT_DIR="../results/version2/stage1/BEVDiffuser_tiny_seg_one-hot_v11/checkpoint-50000"
 LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
-RESUME_FROM="None"
-RUN_NAME="DiffBEVFormer_tiny_seg_v17"
+RESUME_FROM="../results/version2/stage2/DiffBEVFormer_tiny_seg_v28/epoch_6.pth"
+RUN_NAME="DiffBEVFormer_tiny_seg_v28"
 WORK_DIR="../results/version2/stage2"
 
 # export PYTHONWARNINGS="ignore"
@@ -33,4 +33,4 @@ torchrun --nproc_per_node=4 --master_port=29503 \
     --tracker_run_name=$RUN_NAME \
     --unet_checkpoint_dir=$UNET_CHECKPOINT_DIR \
     --load_from=$LOAD_FROM \
-    # --resume_from=$RESUME_FROM \
+    --resume_from=$RESUME_FROM \

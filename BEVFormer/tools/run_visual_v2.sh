@@ -45,14 +45,14 @@ BASE_JSON="../results/version2/stage2/DiffBEVFormer_tiny_original_24epoch/val/Th
 OURS_JSON_PREFIX="${OURS_DIR}/val/run_visual_v2"
 BASE_JSON_PREFIX="${BASE_DIR}/val/run_visual_v2"
 
-VIS_OUT_DIR=${VIS_OUT_DIR:-"../results/visualize/det_vis/figures"}
+VIS_OUT_DIR=${VIS_OUT_DIR:-"../results/visualize/det_vis/figures8"}
 
 # ---------- visualization params ----------
 DATA_ROOT="./data/nuscenes"
 NUSC_VERSION="v1.0-trainval"
 START_IDX=0
 NUM_SAMPLES=20
-SCORE_THR=0.3
+SCORE_THR=0.5
 DPI=300
 # Info pkl used at training/eval time. When set, GT panels are filtered to the
 # exact set of GT boxes used during training (valid_flag + 10 detection classes
@@ -65,9 +65,16 @@ SCENE_TOKENS=()
 # Optional scene-description filter, e.g. ("rain") or ("rain" "night").
 # Leave empty to disable. SCENE_MATCH ∈ {any, all}.
 # Ignored when SCENE_TOKENS is non-empty.
-SCENE_KEYWORDS=("rain" "night")
-# SCENE_KEYWORDS=()
+# SCENE_KEYWORDS=("rain" "night")
+SCENE_KEYWORDS=("night")
 SCENE_MATCH="any"
+# Optional region/location filter, matched against the nuScenes log 'location'
+# field: boston-seaport, singapore-onenorth, singapore-queenstown,
+# singapore-hollandvillage. Substring match, so "boston" keeps all Boston
+# scenes. Applied together with SCENE_KEYWORDS (AND). Ignored when SCENE_TOKENS
+# is non-empty. Leave empty () to disable.
+# e.g. SCENE_LOCATION=("boston")
+SCENE_LOCATION=()
 
 mkdir -p "${VIS_OUT_DIR}"
 
@@ -123,9 +130,15 @@ SCENE_ARGS=()
 if [ ${#SCENE_TOKENS[@]} -gt 0 ]; then
     SCENE_ARGS+=(--scene_tokens "${SCENE_TOKENS[@]}")
     echo "[run_visual_v2] scene_token filter: ${SCENE_TOKENS[*]}"
-elif [ ${#SCENE_KEYWORDS[@]} -gt 0 ]; then
-    SCENE_ARGS+=(--scene_keywords "${SCENE_KEYWORDS[@]}" --scene_match "${SCENE_MATCH}")
-    echo "[run_visual_v2] scene filter [${SCENE_MATCH}]: ${SCENE_KEYWORDS[*]}"
+else
+    if [ ${#SCENE_KEYWORDS[@]} -gt 0 ]; then
+        SCENE_ARGS+=(--scene_keywords "${SCENE_KEYWORDS[@]}" --scene_match "${SCENE_MATCH}")
+        echo "[run_visual_v2] scene keyword filter [${SCENE_MATCH}]: ${SCENE_KEYWORDS[*]}"
+    fi
+    if [ ${#SCENE_LOCATION[@]} -gt 0 ]; then
+        SCENE_ARGS+=(--scene_location "${SCENE_LOCATION[@]}")
+        echo "[run_visual_v2] location filter: ${SCENE_LOCATION[*]}"
+    fi
 fi
 
 echo "[run_visual_v2] visualizing → ${VIS_OUT_DIR}"

@@ -6,32 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.runner import force_fp32
 
-SKY_SEG_ID = 16 
-
-
-# class SegEmbedEncoder(nn.Module):
-#     def __init__(self, num_classes):
-#         super().__init__()
-#         self.num_classes = num_classes
-#         self.downsample_factor = 2
-
-#     def forward(self, seg_id):
-#         B, V, H, W = seg_id.shape
-#         seg_id = seg_id.view(B * V, H, W)
-#         seg_id = torch.where(seg_id == SKY_SEG_ID, torch.full_like(seg_id, -1), seg_id)  # 'sky' -> 'background'
-#         seg_id = seg_id.clamp(min=-1, max=self.num_classes)
-#         seg_id = torch.where(seg_id == -1, torch.zeros_like(seg_id), seg_id)
-
-#         # Nearest downsampling (이산 ID에 수학적으로 유효하며, One-hot 연산 이전에 실행하여 메모리 최적화)
-#         seg_id_ds = F.interpolate(
-#             seg_id.unsqueeze(1).float(),
-#             scale_factor=0.5, mode='nearest'
-#         ).squeeze(1).long()                           # [B*V, H//2, W//2]
-
-#         seg_oh = F.one_hot(seg_id_ds, num_classes=self.num_classes + 1).float()        # [B*V, H//2, W//2, num_classes+1]
-#         seg_oh = seg_oh.permute(0, 3, 1, 2).contiguous()  # [B*V, num_classes+1, H//2, W//2]
-#         return seg_oh
-
 class SegEmbedEncoder(nn.Module):
     def __init__(self, num_classes):
         super().__init__()

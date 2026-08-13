@@ -6,6 +6,14 @@
 # smaller input size: 1600*900 -> 800*450
 # multi-scale feautres -> single scale features (C5)
 
+'''
+
+BFDN without Gate
+
+Revised seg_bev_aligner & pre-processing SAM3 segmentation maps
+
+'''
+
 
 _base_ = [
     '../datasets/custom_nus-3d.py',
@@ -31,10 +39,22 @@ class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
-
+# Additional class for segmaps (keys = raw seg-id AFTER seg_id_remap below)
 seg_class = {
-    2: ['highway', 10], 5: ['terrain', 11], 6: ['tree', 12], 7: ['sidewalk', 13], 11: ['manmade', 14], 16: ['sky', 15]
+    2: ['road', 10], 5: ['terrain', 11], 6: ['tree', 12], 7: ['sidewalk', 13], 11: ['manmade', 14], 16: ['sky', 15]
 }
+
+total_class = [
+    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone',
+    'road', 'terrain', 'tree', 'sidewalk', 'manmade', 'sky'
+]
+
+# SAM3 raw seg-id -> model taxonomy remap 
+#   crosswalk(16)/lane(17)/road arrow(18) -> road(2) 
+#   sky(19) -> 16 
+seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
+
 
 input_modality = dict(
     use_lidar=False,
@@ -52,14 +72,15 @@ bev_w_ = 50
 queue_length = 3 # each sequence contains `queue_length` frames.
 
 num_bboxes = 300
-num_classes = len(class_names) + 2
+# num_classes = len(class_names) + 2 
+num_classes = len(total_class) + 2   # 3DOD + Seg class
 use_3d_bbox = True
 use_layout = True
 use_semantics = True
+use_depth = False
 
 unet = dict(
-    # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
-    type='layout_diffusion.layout_seg_diffusion_unet.LayoutDiffusionUNetModel',
+    type='layout_diffusion.layout_seg_diffusion_unet_v4_4.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -88,21 +109,21 @@ unet = dict(
             bev_h=bev_h_,
             bev_w=bev_w_,
             pc_range=point_cloud_range,
-            num_points_in_pillar=6,  # 4 -> 6
+            num_points_in_pillar=4,  # num_poitns: 4 -> 6
+            # ground plane is z ~= -1.84, so this samples -2.0m ~ +3.8m above ground.
+            # The span (not the point count) drives how mixed the BEV histogram is:
+            # (-1.84, -0.04) collapsed 72% of observed cells to a single class.
+            # pillar_z_range=(-3.84, 1.96),
             num_classes=16,
-            # embed_dim=64, # 256
             emb_channels=256,
             channel_mult=[1, 2, 4],
-            final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
-            v_min_frac=0,        # 이미지 상단 30%(하늘/배경) 배제 → 도로/객체 영역 위주 샘플링
-            vote_weight_mode=None, # 'depth' | 'uv_spread' 
-            # depth_weight_mode='none',  # 'inv_depth' | 'exp_decay' | 'none'
-            # z_sampling='uniform',       # 'uniform' | 'log' (Z축 샘플링 분포)
+            final_dim=(480, 800), 
         ),
         layout_encoder=dict(
             type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
             parameters=dict(
                 used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
+                # used_condition_types=['obj_name', 'obj_bbox', 'is_valid_obj'],
                 layout_length=num_bboxes,
                 num_classes_for_layout_object=num_classes,
                 mask_size_for_layout_object=0,
@@ -118,17 +139,6 @@ unet = dict(
             ),
         ),
 )
-
-# backbone_conf = {
-#     'x_bound': [-51.2, 51.2, 0.8],
-#     'y_bound': [-51.2, 51.2, 0.8],
-#     'z_bound': [-5, 3, 8],
-#     'd_bound': [2.0, 58.0, 0.5],
-#     'final_dim': final_dim,
-#     'output_channels': bev_dim,
-#     'downsample_factor': downsample_factor,  # 16  
-# }
-
 
 model = dict(
     type='BEVFormer',
@@ -253,9 +263,10 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
-dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-# data_root = '../../data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+# dataset_type = 'CustomNuScenesDiffusionDataset_layout'
+dataset_type = 'CustomNuScenesDiffusionDataset_layout_seg'
+data_root = '../../data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 
@@ -301,9 +312,15 @@ data = dict(
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
         use_layout=use_layout,
         use_semantics=use_semantics,
-        semantic_path=data_root + 'nuscenes_semantic',
+        use_depth=use_depth,
+        semantic_path=data_root + 'nuscenes_sam3',
+        # semantic_path=data_root + 'nuscenes_semantic_sam3',
+        # depth_path=data_root + 'nuscenes_depth_da3',
         pipeline=train_pipeline,
         classes=class_names,
+        total_class=total_class,    # det + seg class
+        seg_class=seg_class,
+        seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
         modality=input_modality,
         test_mode=False,
         use_valid_flag=True,
@@ -317,17 +334,31 @@ data = dict(
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
              use_layout=use_layout,
              use_semantics=use_semantics,
-             semantic_path=data_root + 'nuscenes_semantic_val',
+             use_depth=use_depth,
+             semantic_path=data_root + 'nuscenes_sam3',
+            #  semantic_path=data_root + 'nuscenes_semantic_sam3',
+            #  depth_path=data_root + 'nuscenes_depth_da3',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
-             classes=class_names, modality=input_modality, samples_per_gpu=1),
+             classes=class_names,
+             total_class=total_class,   # det + seg class
+             seg_class=seg_class,
+             seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+             modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
               use_layout=use_layout,
               use_semantics=use_semantics,
-              semantic_path=data_root + 'nuscenes_semantic_val',
+              use_depth=use_depth,
+              semantic_path=data_root + 'nuscenes_sam3',
+            #   semantic_path=data_root + 'nuscenes_semantic_sam3',
+            #   depth_path=data_root + 'nuscenes_depth_da3',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
-              classes=class_names, modality=input_modality),
+              classes=class_names,
+              total_class=total_class,  # det + seg class
+              seg_class=seg_class,
+              seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+              modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
 )

@@ -31,13 +31,10 @@ class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
-
-text_prompt = [
-    'car', 'truck', 'crane', 'bus', 'trailer', 'barrier',
-    'motorcycle', 'bicycle', 'pedestrian', 'cone',
-    'barricade', 'motorcyclist', 'bicyclist', 'highway', 'sidewalk', 'terrain', 'tree',
-    'building', 'bridge', 'pole', 'billboard', 'light', 'ashbin', 'sky',
-]
+# SAM3 raw seg-id -> model taxonomy remap
+#   crosswalk(16)/lane(17)/road arrow(18) -> road(2)
+#   sky(19) -> 16
+seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
 
 input_modality = dict(
     use_lidar=False,
@@ -57,12 +54,11 @@ queue_length = 3 # each sequence contains `queue_length` frames.
 num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
-use_layout = True
 use_semantics = True
+use_depth = False  # DA3 depth maps for FB-BEV depth consistency in BEV aligners
 
 unet = dict(
-    # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
-    type='layout_diffusion.layout_seg_diffusion_unet_v5.LayoutDiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -72,8 +68,6 @@ unet = dict(
         out_channels=_dim_,
         seg_channels=[256, 512, 1024],
         model_channels=256,
-        context_dim=256,  # 768 (original DINOv2)
-        encoder_channels=256, # assert same as layout_encoder.hidden_dim
         num_head_channels=32,
         num_heads=-1,
         num_heads_upsample=-1,
@@ -86,46 +80,47 @@ unet = dict(
         channel_mult=[ 1, 2, 4 ],
         dropout=0.0,
         use_checkpoint=False,
-        use_positional_embedding_for_attention=True,
-        attention_block_type='ObjectAwareCrossAttention',
+        # ---- Segmentation one-hot → BEV aligner (with FB-BEV depth consistency) ----
         seg_bev_aligner=dict(
             bev_h=bev_h_,
             bev_w=bev_w_,
-            cam_view=6,
             pc_range=point_cloud_range,
             num_points_in_pillar=4,
             num_classes=16,
-            embed_dim=64,
+            # embed_dim=64, # 256
             emb_channels=256,
             channel_mult=[1, 2, 4],
             final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
+            v_min_frac=0,        # 이미지 상단 30%(하늘/배경) 배제 → 도로/객체 영역 위주 샘플링
+            depth_consistency_mode='gaussian',  # gaussian | bin_linear | None
+            depth_consistency_sigma=2.0,
+            d_bound=[2.0, 58.0, 0.5],
         ),
-        layout_encoder=dict(
-            type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
-            parameters=dict(
-                used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
-                # used_condition_types=['obj_name', 'obj_bbox', 'is_valid_obj'],
-                layout_length=num_bboxes,
-                num_classes_for_layout_object=num_classes,
-                mask_size_for_layout_object=0,
-                hidden_dim=256,
-                output_dim=1024, # model_channels x 4
-                num_layers=6,
-                num_heads=8,
-                use_final_ln=True,
-                use_positional_embedding=False,
-                resolution_to_attention=[12, 25, 50], #[ 8, 16, 32 ],
-                use_key_padding_mask=False,
-                use_3d_bbox=use_3d_bbox),
-            ),
-        ),
+    ),
 )
 
+bev_diffuser_cfg=dict(
+    unet_cfg=unet,
+    unet_checkpoint_dir=None,
+    pretrained_model_name_or_path="stabilityai/stable-diffusion-2-1",
+    prediction_type="sample",
+    noise_timesteps=100,
+    denoise_timesteps=100,
+    num_inference_steps=5,
+    use_classifier_guidence=False)
+
+find_unused_parameters=False
+
+train_task_decoder = True
+
 model = dict(
-    type='BEVFormer',
+    type='DiffBEVFormerSegV3',
+    use_mgd=True,
+    mgd_alpha=100,   # reduction='mean' 기준; task_loss(≈16)와 균형 맞춤 (paper 0.00002는 sum/N 기준)
+    mgd_lambda=0.65,  # paper detection 권장값
     use_grid_mask=True,
     video_test_mode=True,
-    # pretrained=dict(img='torchvision://resnet50'),
+    pretrained=dict(img='torchvision://resnet50'),
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -134,8 +129,7 @@ model = dict(
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
-        style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')), 
+        style='pytorch'),
     img_neck=dict(
         type='FPN',
         in_channels=[2048],
@@ -244,8 +238,8 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
-dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-data_root = '../../data/nuscenes/'
+dataset_type = 'CustomNuScenesDiffusionDataset_seg_depth'
+data_root = 'data/nuscenes/'
 # data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
@@ -266,7 +260,7 @@ train_pipeline = [
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
+   
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1600, 900),
@@ -279,20 +273,23 @@ test_pipeline = [
                 type='DefaultFormatBundle3D',
                 class_names=class_names,
                 with_label=False),
-            dict(type='CustomCollect3D', keys=['gt_bboxes_3d', 'gt_labels_3d','img'])
+            dict(type='CustomCollect3D', keys=['img'])
         ])
 ]
 
+
 data = dict(
-    samples_per_gpu=1,
+    samples_per_gpu=4,
     workers_per_gpu=4,
     train=dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
-        use_layout=use_layout,
         use_semantics=use_semantics,
-        semantic_path=data_root + 'nuscenes_semantic',
+        use_depth=use_depth,
+        semantic_path=data_root + 'nuscenes_semantic_sam3',
+        seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+        depth_path=data_root + 'nuscenes_depth_da3',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -306,17 +303,21 @@ data = dict(
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-             use_layout=use_layout,
              use_semantics=use_semantics,
-             semantic_path=data_root + 'nuscenes_semantic_val',
+             use_depth=use_depth,
+             semantic_path=data_root + 'nuscenes_semantic_sam3',
+             seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+             depth_path=data_root + 'nuscenes_depth_da3',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-              use_layout=use_layout,
               use_semantics=use_semantics,
-              semantic_path=data_root + 'nuscenes_semantic_val',
+              use_depth=use_depth,
+              semantic_path=data_root + 'nuscenes_semantic_sam3',
+              seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+              depth_path=data_root + 'nuscenes_depth_da3',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
@@ -325,10 +326,11 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=2e-4,
+    lr=3e-4,
     paramwise_cfg=dict(
         custom_keys={
-            'img_backbone': dict(lr_mult=0.1),
+            'img_backbone': dict(lr_mult=0.5),
+            # 'mgd_generation': dict(lr_mult=2.0, decay_mult=0.0),
         }),
     weight_decay=0.01)
 
@@ -341,9 +343,9 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=1, pipeline=test_pipeline)
+evaluation = dict(interval=12, pipeline=test_pipeline)
 
-runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
+runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
 
 log_config = dict(
     interval=50,
@@ -352,4 +354,9 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=6)
+
+custom_hooks = [
+    dict(type='UpdateTarget', epoch_interval=0)
+]
+

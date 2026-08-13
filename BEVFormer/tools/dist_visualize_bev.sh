@@ -12,9 +12,9 @@ export TCNN_CUDA_ARCHITECTURES=86
 GPUS=${1:-1}
 PORT=${PORT:-28509}
 
-CONFIG="./projects/configs/diff_bevformer/layout_tiny_seg_v4_adapter_aux.py"
-CHECKPOINT="../results/version2/stage2/DiffBEVFormer_tiny_seg_v8/latest.pth"
-OUT_DIR="../results/bev_visualize_stage2"
+CONFIG="./projects/configs/diff_bevformer/layout_tiny.py"
+CHECKPOINT="../results/version2/stage2/DiffBEVFormer_tiny_original_24epoch/epoch_24.pth"
+OUT_DIR="../results/visualize/stage2_bev"
 MAX_SAMPLES=-1
 
 PYTHONPATH="$(dirname $0)/..":$PYTHONPATH \

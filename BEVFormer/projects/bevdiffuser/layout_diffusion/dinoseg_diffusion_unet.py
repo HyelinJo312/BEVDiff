@@ -31,7 +31,7 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmcv.utils import TORCH_VERSION, digit_version
 from .multiscale_fusion import *
 from .dino_bev_aligner import DINOBEVAligner
-from .seg_bev_aligner import SegBEVAligner
+from .seg_bev_aligner_one_hot_v3 import SegBEVAligner
 
 def convert_module_to_f16(l):
     """
@@ -68,7 +68,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     def forward(self, x, emb, dino_cond=None, seg_cond=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
-                if isinstance(layer, FDNResBlock):
+                if isinstance(layer, BFDNResBlock):
                     x = layer(x, emb, seg_cond)
                 elif isinstance(layer, ResBlock):
                     x = layer(x, emb)
@@ -276,7 +276,7 @@ class FDN(nn.Module):
         out = normalized * (1 + gamma) + beta
         return out
 
-class FDNResBlock(TimestepBlock):
+class BFDNResBlock(TimestepBlock):
     def __init__(
             self,
             channels,
@@ -301,7 +301,7 @@ class FDNResBlock(TimestepBlock):
 
         self.norm_0 = FDN(channels, seg_channels)
         self.norm_1 = FDN(self.out_channels, seg_channels)
-
+        
         self.updown = up or down
 
         if up:
@@ -343,6 +343,11 @@ class FDNResBlock(TimestepBlock):
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
 
     def forward(self, x, emb, seg_bev):
+        if self.use_checkpoint:
+            return th.utils.checkpoint.checkpoint(self._forward, x, emb, seg_bev, use_reentrant=False)
+        return self._forward(x, emb, seg_bev)
+
+    def _forward(self, x, emb, seg_bev):
         h = self.norm_0(x, seg_bev)
         h = self.in_layers(h)
 
@@ -355,6 +360,9 @@ class FDNResBlock(TimestepBlock):
         h = self.norm_1(h, seg_bev)
         h = self.out_layers(h)
         return self.skip_connection(x) + h
+
+
+
 
 
 class AttentionBlock(nn.Module):
@@ -718,8 +726,7 @@ class DiffusionUNetModel(nn.Module):
 
         # DINO feature condition
         self.adapter = DINOContextAdapter(c_in=dino_dim, c_emb=time_embed_dim, num_views=6)
-        
-        # self.aligner = DINOBevAligner(c_dino=dino_dim, c_ctx=context_dim)
+
         self.dino_aligner = DINOBEVAligner(**dino_bev_aligner)
         
         self.seg_aligner = SegBEVAligner(**seg_bev_aligner)
@@ -750,7 +757,10 @@ class DiffusionUNetModel(nn.Module):
                     )
                 ]
                 ch = int(mult * model_channels)
-                dino_dim = int(mult * context_dim)
+                # DINOBevEncoder keeps a fixed channel width (context_dim) across all
+                # BEV scales (depthwise downsampling), so the cross-attention context
+                # dim is constant, not mult*context_dim.
+                dino_dim = context_dim
                 if ds in attention_ds:
                     print('encoder attention layer: ds = {}, resolution = {}'.format(ds, self.image_size // ds))
                     if num_head_channels == -1:
@@ -807,7 +817,8 @@ class DiffusionUNetModel(nn.Module):
             dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
 
         print('middle attention layer: ds = {}, resolution = {}'.format(ds, self.image_size // ds))
-        mid_dino_dim = int(channel_mult[-1] * context_dim)
+        # fixed-width DINO BEV context (see encoder note)
+        mid_dino_dim = context_dim
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -838,7 +849,7 @@ class DiffusionUNetModel(nn.Module):
                 ich = input_block_chans.pop()
                 if i == 0 or i == 2:
                     layers = [
-                        FDNResBlock(
+                        BFDNResBlock(
                             ch + ich,
                             time_embed_dim,
                             dropout,
@@ -861,7 +872,8 @@ class DiffusionUNetModel(nn.Module):
                         )
                     ]
                 ch = int(model_channels * mult)
-                dino_dim = int(context_dim * mult)
+                # fixed-width DINO BEV context (see encoder note)
+                dino_dim = context_dim
                 if ds in attention_ds:
                     print('decoder attention layer: ds = {}, resolution = {}'.format(ds, self.image_size // ds))
                     if num_head_channels == -1:
@@ -923,55 +935,61 @@ class DiffusionUNetModel(nn.Module):
         self.dino_aligner.convert_to_fp16()
         self.seg_aligner.convert_to_fp16()
 
-    def forward(self, x, timesteps, img_metas, dino_cond, seg_cond):
+    def forward(self, x, timesteps, img_metas, dino_cond, seg_cond, depth_maps=None):
         hs = []
 
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
-        dino_cond_proj = self.adapter(dino_cond['last_cls'])  
-        
+        # GetDINOV2Feat: last_cls    (B, T, V, C),  last_tokens (B, T, V, C, Hp, Wp)
+        last_cls = dino_cond['last_cls']
+        if last_cls.dim() == 4:               # (B, T, V, C)
+            last_cls = last_cls[:, -1]        # → (B, V, C)
+            
+        dino_cond_proj = self.adapter(last_cls)
+
         emb = emb + dino_cond_proj.to(emb)  # emb: (B, 640)
 
-        dino_bev_dict = self.dino_aligner(dino_cond['last_tokens'], patch_hw=dino_cond['patch_hw'], 
-                        img_metas=img_metas, dino_geom=dino_cond['geom'])   
+        # dino_aligner handles the (B,T,V,C,Hp,Wp) → current-frame selection internally.
+        dino_bev = self.dino_aligner(dino_cond['last_tokens'], patch_hw=dino_cond['patch_hw'],
+                                    img_metas=img_metas, dino_geom=dino_cond['geom'],
+                                    depth_maps=depth_maps)
         
-        seg_bev_maps = self.seg_aligner(seg_cond, img_metas) # (B, C, H, W)
+        tokens_by_ds = {}
+        for ds_key in self.attention_ds[::-1]:
+            target_hw = int(self.image_size // ds_key)  # 50//1=50, 50//2=25, 50//4=12
+            tokens_by_ds[ds_key] = self._ctx_tokens_from_bev(dino_bev, target_hw)  # (B, target_hw*target_hw, 256)
+        
+        seg_bev_maps = self.seg_aligner(seg_cond, img_metas, depth_maps=depth_maps)
 
-        out_list = []
-        
         h = x.type(self.dtype)  # h: (B, C, H, W)
+        
         for module in self.downsample_blocks:
             h = module(h) 
+            
         # Encoder
         for module in self.input_blocks:
-            dino_tokens = self._select_ctx(dino_bev_dict, module).flatten(2).transpose(1, 2)
-            seg_bev = self._select_ctx(seg_bev_maps, module)
-            h = module(h, emb, dino_tokens, seg_bev) 
+            dino_tokens = self._select_ctx(tokens_by_ds, module)
+            h = module(h, emb, dino_tokens) 
             hs.append(h)
         
         # Middle block
-        dino_tokens_mid = self._select_ctx(dino_bev_dict, self.middle_block).flatten(2).transpose(1, 2)
-        seg_bev_mid = self._select_ctx(seg_bev_maps, self.middle_block)
-        h = self.middle_block(h, emb, dino_tokens_mid, seg_bev_mid)
+        dino_tokens_mid = self._select_ctx(tokens_by_ds, self.middle_block)
+        h = self.middle_block(h, emb, dino_tokens_mid)
         
         # Decoder
-        for i_out, module in enumerate(self.output_blocks):
+        for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            dino_tokens = self._select_ctx(dino_bev_dict, module).flatten(2).transpose(1, 2)
+            dino_tokens = self._select_ctx(tokens_by_ds, module)
             seg_bev = self._select_ctx(seg_bev_maps, module)
             h = module(h, emb, dino_tokens, seg_bev)
 
         h = h.type(x.dtype)
-        final = self.out(h)
+        h = self.out(h)
         
         for module in self.upsample_blocks:
             h = module(h)
-
-        if self.return_multiscale:
-            multi_feat = self.multi_concat(out_list[::-1]) 
-            return final, multi_feat, out_list
-        else:
-            return final
+        return h
+    
     
     def save_pretrained(self, save_directory):
         if os.path.isfile(save_directory):

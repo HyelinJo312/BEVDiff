@@ -71,18 +71,21 @@ class BEVDiffuser(nn.Module):
         if self.denoise_timesteps > 0:
             cond, uncond = condition, self.get_uncondition(condition)
             seg_cond, seg_uncond = segmaps, self.get_segmaps_uncond(segmaps)
-            # seg_bev = self.unet.seg_aligner(seg_cond, img_metas, depth_maps=depth_maps)  # (B, C, H, W)
+
+            # seg conditioning does not depend on t: project once, reuse every step
+            seg_bev_cond = self.unet.encode_seg(seg_cond, img_metas, depth_maps=depth_maps)
+            seg_bev_uncond = self.unet.encode_seg(seg_uncond, img_metas, depth_maps=depth_maps)
 
             self.noise_scheduler.config.num_train_timesteps=self.denoise_timesteps
             self.noise_scheduler.set_timesteps(num_inference_steps=self.num_inference_steps)
-         
+
             for _, t in enumerate(self.noise_scheduler.timesteps):
                 t_batch = torch.tensor([t] * x.shape[0], device=x.device)
-                noise_pred_uncond = self.unet(x, t_batch, img_metas, seg_uncond, depth_maps=depth_maps, **uncond)[0]
-                noise_pred_cond, seg_bev_prob = self.unet(x, t_batch, img_metas, seg_cond, depth_maps=depth_maps, **cond)
+                noise_pred_uncond = self.unet(x, t_batch, img_metas, None, depth_maps=depth_maps, seg_bev_maps=seg_bev_uncond, **uncond)[0]
+                noise_pred_cond = self.unet(x, t_batch, img_metas, None, depth_maps=depth_maps, seg_bev_maps=seg_bev_cond, **cond)[0]
                 noise_pred = noise_pred_uncond + 2.0 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = grad_fn(x) if self.use_classifier_guidence and grad_fn else None # self.use_classifier_guidence=False
                 x = self.noise_scheduler.step(noise_pred, t, x, return_dict=False, classifier_gradient=classifier_gradient)[0] 
-                
-        return x, seg_bev_prob
+            
+        return x
         # return x, seg_bev

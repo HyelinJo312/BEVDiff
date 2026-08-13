@@ -141,9 +141,15 @@ train_task_decoder = True
 
 model = dict(
     type='DiffBEVFormerSeg',
-    use_proj=True,  # original raw MSE (use_proj=True → A+B: projector + GroupNorm)
-    use_seg_mask=False,
-    fg_weight_alpha=5.0,
+    use_proj=False,                     # projector-based MSE
+    use_aux_seg=False,                  # KL aux supervision (v18 mechanism)
+    aux_seg_num_classes=16,
+    aux_seg_weight=1.0,
+    aux_seg_valid_threshold=0.1,
+    # === NEW: GT-bbox Gaussian-heatmap-weighted MSE (BEVDistill-style, Option A) ===
+    use_bbox_weight=True,
+    bbox_weight_min_overlap=0.1,       # gaussian_radius IoU threshold (BEVDistill default)
+    pc_range=point_cloud_range,
     use_grid_mask=True,
     video_test_mode=True,
     pretrained=dict(img='torchvision://resnet50'),

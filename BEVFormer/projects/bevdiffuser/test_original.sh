@@ -1,6 +1,6 @@
 set -e
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
 # BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
@@ -8,7 +8,7 @@ BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
 CHECKPOINT_DIR="../../../results/BEVDiffuser_BEVFormer_tiny_original_bs2/checkpoint-50000"
 
 BEV_CHECKPOINT="../../../results/BEVDiffuser_BEVFormer_tiny_original_bs2/checkpoint-50000/bev_model.pth"
-# "../../ckpts/bevformer_tiny_epoch_24.pth" 
+# BEV_CHECKPOINT="../../ckpts/bevformer_tiny_epoch_24.pth" 
 
 PREDICTION_TYPE="sample"
 
@@ -28,9 +28,9 @@ torchrun --nproc_per_node=4 \
     --bev_checkpoint $BEV_CHECKPOINT \
     --checkpoint_dir $CHECKPOINT_DIR \
     --prediction_type $PREDICTION_TYPE \
-    --noise_timesteps 1001 \
-    --denoise_timesteps 1001 \
-    --num_inference_steps 50 \
+    --noise_timesteps 5 \
+    --denoise_timesteps 5 \
+    --num_inference_steps 5 \
     # --use_classifier_guidence \
 
 

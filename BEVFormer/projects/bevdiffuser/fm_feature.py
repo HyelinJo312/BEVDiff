@@ -61,12 +61,16 @@ class GetDINOV2Feat(nn.Module):
         device: str = 'cuda',
         patch: int = 14,
         symmetric_pad: bool = True,
+        use_half: bool = True,     # fp16 inference → attention score buffer 절반 (frozen이라 정확도 영향 미미)
+        chunk_size: int = 6,       # B*V를 이 크기로 나눠 순차 forward → peak를 batch와 무관하게 상한 고정 (0/None=전체 한 번에)
     ):
         super().__init__()
         assert encoder in ['vits', 'vitb', 'vitl']
         self.device = device
         self.patch = patch
         self.symmetric_pad = symmetric_pad
+        self.use_half = use_half
+        self.chunk_size = chunk_size
 
         # self.model = Dinov2Model.from_pretrained("facebook/dinov2-base").to(self.device)
         self.model = AutoModel.from_pretrained('facebook/dinov2-base').to(self.device)
@@ -74,6 +78,9 @@ class GetDINOV2Feat(nn.Module):
         for p in self.model.parameters():
             p.requires_grad_(False)
         self.model.eval()
+        
+        if self.use_half:
+            self.model.half()  # torch 1.10 → SDPA/flash 불가. dtype으로 O(N^2) attention 버퍼를 줄임
 
         self.hidden_dim = self.model.config.hidden_size  # 384/768/1024
 
@@ -103,6 +110,7 @@ class GetDINOV2Feat(nn.Module):
 
         extra_geom = {
             'scale': 1.0,
+            'input_hw': (H, W),
             'H2W2': (H2, W2),
             'padding': (top, left),
             'patch_size': self.patch,
@@ -138,11 +146,18 @@ class GetDINOV2Feat(nn.Module):
         
         x, Hp, Wp, extra_geom = self.image_preprocess(x)
 
-        # Dinov2 forward  
+        # Dinov2 forward — B*V_total을 chunk_size씩 나눠 순차 처리해 attention peak 상한 고정.
+        # frozen inference라 chunk 분할/ fp16 캐스팅 모두 결과 동일(수치 오차 무시 가능).
+        model_dtype = next(self.model.parameters()).dtype
+        BV = x.shape[0]
+        cs = self.chunk_size if (self.chunk_size and self.chunk_size > 0) else BV
+        h_chunks = []
         with torch.no_grad():
-            outputs = self.model(pixel_values=x, output_hidden_states=False)
-
-        h = outputs.last_hidden_state                                        # (B*V_total, 1+Hp*Wp, C_dino)
+            for i in range(0, BV, cs):
+                xb = x[i:i + cs].to(model_dtype)
+                out = self.model(pixel_values=xb, output_hidden_states=False)
+                h_chunks.append(out.last_hidden_state.float())  # downstream aligner는 fp32 기대
+        h = torch.cat(h_chunks, dim=0) if len(h_chunks) > 1 else h_chunks[0]  # (B*V_total, 1+Hp*Wp, C_dino)
         last_cls    = h[:, 0].view(B, T, V, self.hidden_dim)                 # (B, T, V, C)
         # h[:,1:] is (B*V_total, Hp*Wp, C_dino) — spatial-first in memory.
         # Must reshape spatial dims before moving channel to front.

@@ -170,11 +170,12 @@ def test():
     if args.prediction_type is not None:
         noise_scheduler.register_to_config(prediction_type=args.prediction_type)
     
-    bev_model, dino_aligner = get_bev_model_v2(args, bev_cfg, use_dino_bev=True)
+    # bev_model, dino_aligner = get_bev_model_v2(args, bev_cfg, use_dino_bev=True)
+    bev_model = get_bev_model(args)
     if not args.use_classifier_guidence:
         bev_model.requires_grad_(False)
     bev_model.eval()
-    dino_aligner.eval()
+    # dino_aligner.eval()
     
     unet = build_unet_v2(bev_cfg.unet)
     unet.from_pretrained(args.checkpoint_dir, subfolder="unet")
@@ -188,12 +189,10 @@ def test():
     bev_cfg.data.test.load_annos = True
     dataset = build_dataset(bev_cfg.data.test,
                             default_args={
-                                        'pc_range': bev_cfg.point_cloud_range,
-                                        'use_3d_bbox': bev_cfg.use_3d_bbox,
-                                        'num_classes': bev_cfg.num_classes,
-                                        'num_bboxes': bev_cfg.num_bboxes,
-                                        'use_layout': False,
-                                        'use_semantics': True,
+                                          'pc_range': bev_cfg.point_cloud_range,
+                                          'use_3d_bbox': bev_cfg.use_3d_bbox,
+                                          'num_classes': bev_cfg.num_classes,
+                                          'num_bboxes': bev_cfg.num_bboxes,
                                     })
     dataloader = build_dataloader(
         dataset,
@@ -209,7 +208,7 @@ def test():
     evaluate(unet=unet,
              bev_model=bev_model,
              get_dino=get_dino,
-             dino_aligner=dino_aligner,
+            #  dino_aligner=dino_aligner,
              noise_scheduler=noise_scheduler,
              dataset=dataset,
              dataloader=dataloader,
@@ -225,7 +224,7 @@ def test():
 def evaluate(unet,
              bev_model,
              get_dino,
-             dino_aligner,
+            #  dino_aligner,
              noise_scheduler,
              dataset,
              dataloader,
@@ -259,15 +258,19 @@ def evaluate(unet,
     
     for step, batch in enumerate(dataloader):
 
+        latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
+        
+        latents = latents.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)
+        
+        latents = latents.permute(0, 3, 1, 2)
+        
         img = batch['img'][0].data[0]
         img_metas = batch['img_metas'][0].data[0]  # list of B dicts (single frame)
-
-        # DINOBevAligner expects list[list[dict]]: img_metas_aligner[t] = list of B dicts
-        img_metas_aligner = [img_metas]  # T=1
-
-        with torch.no_grad():
-            dino_out = get_dino(img, img_metas)
-            latents = dino_aligner(dino_out, img_metas_aligner).detach()  # (B, 256, 50, 50)
+        dino_out = get_dino(img, img_metas)
+        
+        depth_maps = None
+        if 'depth_maps' in batch.keys():
+            depth_maps = torch.stack(batch['depth_maps'].data[0], dim=0).to(latents.device)
 
         def get_dino_uncond(cond):
             uncond = {k: v.clone() if isinstance(v, torch.Tensor) else v
@@ -303,22 +306,11 @@ def evaluate(unet,
         
             for _, t in enumerate(noise_scheduler.timesteps): # 5 -> 4 -> 3 -> 2 -> 1
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                noise_pred_uncond, noise_pred_cond = unet(latents, t_batch, img_metas, dino_uncond, seg_uncond)[0], unet(latents, t_batch, img_metas, dino_cond, seg_cond)[0]
+                noise_pred_uncond = unet(latents, t_batch, img_metas, dino_uncond, seg_uncond, depth_maps=depth_maps)
+                noise_pred_cond = unet(latents, t_batch, img_metas, dino_cond, seg_cond, depth_maps=depth_maps)
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]
-
-        else:
-            # extract multi-scale features
-            dino_cond = dino_out  # reuse features from DINOBevAligner
-            t_test = torch.tensor([100] * latents.shape[0], device=latents.device)  
-            # multi_feat = unet(latents, t_test, dino_cond, **cond)[1] 
-            latents = unet(latents, t_test, dino_cond, seg_cond)[0] 
-            
-            # # get detection results
-            # multi_feat = multi_feat.permute(0, 2, 3, 1)            
-            # multi_feat = multi_feat.reshape(-1, bev_cfg.bev_h_*bev_cfg.bev_w_, bev_cfg._dim_)
-            # det_resu  lt = bev_model(return_loss=False, only_bev=False, given_bev=multi_feat, rescale=True, **batch)
         
         # get detection results
         latents = latents.permute(0, 2, 3, 1)            

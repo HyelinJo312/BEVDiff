@@ -6,6 +6,8 @@
 # Copyright (c) 2023 LayoutDiffusion authors, licensed under the MIT license,
 # cf. 3rd-party-licenses.txt file in the root directory of this source tree.
 
+
+
 from abc import abstractmethod
 import os
 import safetensors
@@ -30,8 +32,8 @@ from projects.bevdiffuser.ldm.modules.attention import SpatialTransformer
 from mmcv.runner import force_fp32, auto_fp16
 from mmcv.utils import TORCH_VERSION, digit_version
 from .multiscale_fusion import *
-# from .seg_bev_aligner import SegBEVAligner
-from .seg_bev_aligner_v2 import SegBEVAligner
+from .seg_bev_aligner_one_hot_v4 import SegBEVAligner
+
 
 def convert_module_to_f16(l):
     """
@@ -69,11 +71,12 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
         extra_output = None
         for layer in self:
             if isinstance(layer, TimestepBlock):
-                x = layer(x, emb)
+                if isinstance(layer, BFDNResBlock):
+                    x = layer(x, emb, seg_cond)
+                elif isinstance(layer, ResBlock):
+                    x = layer(x, emb)
             elif isinstance(layer, (AttentionBlock, ObjectAwareCrossAttention)):
                 x, extra_output = layer(x, cond_kwargs)
-            elif isinstance(layer, SpatialTransformer):
-                x = layer(x, seg_cond)
             else:
                 x = layer(x)
         return x, extra_output
@@ -101,6 +104,11 @@ class Upsample(nn.Module):
 
     def forward(self, x):
         assert x.shape[1] == self.channels
+        # PyTorch 1.10's upsample_nearest2d CUDA kernel lacks BFloat16 support;
+        # cast to fp32 around interpolate and restore the original dtype.
+        orig_dtype = x.dtype
+        if orig_dtype == torch.bfloat16:
+            x = x.float()
         if self.dims == 3:
             if self.out_size is None:
                 x = F.interpolate(
@@ -115,6 +123,8 @@ class Upsample(nn.Module):
                 x = F.interpolate(x, scale_factor=2, mode="nearest")
             else:
                 x = F.interpolate(x, size=self.out_size, mode="nearest")
+        if x.dtype != orig_dtype:
+            x = x.to(orig_dtype)
         if self.use_conv:
             x = self.conv(x)
         return x
@@ -240,6 +250,11 @@ class ResBlock(TimestepBlock):
         :param emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        if self.use_checkpoint:
+            return th.utils.checkpoint.checkpoint(self._forward, x, emb, use_reentrant=False)
+        return self._forward(x, emb)
+
+    def _forward(self, x, emb):
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
@@ -259,6 +274,127 @@ class ResBlock(TimestepBlock):
         else:
             h = h + emb_out
             h = self.out_layers(h)
+        return self.skip_connection(x) + h
+
+
+class FDN(nn.Module):
+    def __init__(self, norm_channels, cond_channels):
+        super().__init__()
+        self.param_free_norm = normalization(norm_channels)
+        self.conv_gamma = nn.Conv2d(cond_channels, norm_channels, kernel_size=3, padding=1)
+        self.conv_beta  = nn.Conv2d(cond_channels, norm_channels, kernel_size=3, padding=1)
+
+    def forward(self, x, seg_cond):
+        assert seg_cond.size()[2:] == x.size()[2:]
+        normalized = self.param_free_norm(x)
+        gamma = self.conv_gamma(seg_cond)
+        beta = self.conv_beta(seg_cond)
+        out = normalized * (1 + gamma) + beta
+        return out
+    
+class GatedFDN(nn.Module):
+    def __init__(self, norm_channels, cond_channels):
+        super().__init__()
+        self.param_free_norm = normalization(norm_channels)
+        self.conv_gamma = nn.Conv2d(cond_channels, norm_channels, kernel_size=3, padding=1)
+        self.conv_beta  = nn.Conv2d(cond_channels, norm_channels, kernel_size=3, padding=1)
+        # Gate: 채널별로 [0,1] 범위의 가중치 학습
+        # bias=-1.0 → 초기 gate≈0.27, undecided zone 회피 + 충분한 gradient 유지
+        self.conv_gate  = nn.Conv2d(cond_channels, norm_channels, kernel_size=1)
+        # nn.init.constant_(self.conv_gate.bias, -1.0)
+
+    def forward(self, x, seg_cond):
+        normalized = self.param_free_norm(x)
+        gamma = self.conv_gamma(seg_cond)
+        beta = self.conv_beta(seg_cond)
+        gate = torch.sigmoid(self.conv_gate(seg_cond))  # (B, C, H, W) in [0, 1]
+        out = normalized * (1 + gate * gamma) + gate * beta
+        return out
+
+
+class BFDNResBlock(TimestepBlock):
+    def __init__(
+            self,
+            channels,
+            emb_channels,
+            dropout,
+            out_channels=None,
+            use_conv=False,
+            dims=2,
+            use_checkpoint=False,
+            up=False,
+            down=False,
+            out_size=None,
+            seg_channels=None
+    ):
+        super().__init__()
+        self.channels = channels
+        self.emb_channels = emb_channels
+        self.dropout = dropout
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.use_checkpoint = use_checkpoint
+
+        self.norm_0 = FDN(channels, seg_channels)
+        self.norm_1 = FDN(self.out_channels, seg_channels)
+
+        self.updown = up or down
+
+        if up:
+            self.h_upd = Upsample(channels, False, dims, out_size=out_size)
+            self.x_upd = Upsample(channels, False, dims, out_size=out_size)
+        elif down:
+            self.h_upd = Downsample(channels, False, dims)
+            self.x_upd = Downsample(channels, False, dims)
+        else:
+            self.h_upd = self.x_upd = nn.Identity()
+
+        self.in_layers = nn.Sequential(
+            nn.Identity(),  
+            SiLU(),
+            conv_nd(dims, channels, self.out_channels, 3, padding=1),
+        )
+
+        self.emb_layers = nn.Sequential(
+            SiLU(),
+            linear(
+                emb_channels,
+                self.out_channels),
+        )
+        
+        self.out_layers = nn.Sequential(
+            nn.Identity(),  
+            SiLU(),
+            nn.Dropout(p=dropout),
+            zero_module(
+                conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)),
+        )
+        
+        if self.out_channels == channels:
+            self.skip_connection = nn.Identity()
+        elif use_conv:
+            self.skip_connection = conv_nd(
+                dims, channels, self.out_channels, 3, padding=1)
+        else:
+            self.skip_connection = conv_nd(dims, channels, self.out_channels, 1)
+
+    def forward(self, x, emb, seg_bev):
+        if self.use_checkpoint:
+            return th.utils.checkpoint.checkpoint(self._forward, x, emb, seg_bev, use_reentrant=False)
+        return self._forward(x, emb, seg_bev)
+
+    def _forward(self, x, emb, seg_bev):
+        h = self.norm_0(x, seg_bev)
+        h = self.in_layers(h)
+
+        # time embedding
+        emb_out = self.emb_layers(emb).type(h.dtype)
+        while len(emb_out.shape) < len(h.shape):
+            emb_out = emb_out[..., None]
+
+        h = h + emb_out
+        h = self.norm_1(h, seg_bev)
+        h = self.out_layers(h)
         return self.skip_connection(x) + h
 
 
@@ -324,6 +460,30 @@ class AttentionBlock(nn.Module):
         :return:
             extra_output: N x L2 x 3 x ds x ds
         '''
+        # gradient checkpointing: extra_output은 detach된 임베딩이므로 checkpoint 밖에서 처리
+        if self.use_checkpoint:
+            xf_out = cond_kwargs['xf_out'] if (cond_kwargs is not None and self.encoder_channels is not None) else None
+            if xf_out is not None:
+                output = th.utils.checkpoint.checkpoint(self._forward_ckpt, x, xf_out, use_reentrant=False)
+            else:
+                output = th.utils.checkpoint.checkpoint(self._forward_ckpt, x, use_reentrant=False)
+            return output, None  # extra_output(attention embeddings)은 checkpoint 시 생략
+        return self._forward(x, cond_kwargs)
+
+    def _forward_ckpt(self, x, xf_out=None):
+        """checkpoint용 순수 텐서 입출력 버전 (extra_output 제외)."""
+        b, c, *spatial = x.shape
+        x = x.reshape(b, c, -1)
+        qkv = self.qkv(self.norm(x))
+        if xf_out is not None:
+            kv = self.encoder_kv(xf_out)
+            h = self.attention(qkv, kv, positional_embedding=self.positional_embedding)
+        else:
+            h = self.attention(qkv, positional_embedding=self.positional_embedding)
+        h = self.proj_out(h)
+        return (x + h).reshape(b, c, *spatial)
+
+    def _forward(self, x, cond_kwargs=None):
         extra_output = None
         b, c, *spatial = x.shape
         x = x.reshape(b, c, -1)  # N x C x (HxW)
@@ -417,10 +577,12 @@ class ObjectAwareCrossAttention(nn.Module):
                 if norm_for_obj_embedding:
                     self.norm_for_obj_embedding = normalization(encoder_channels)
                 self.norm_for_obj_class_embedding = normalization(encoder_channels)
+                # self.norm_for_obj_name_embedding = normalization(encoder_channels)
                 self.norm_for_layout_positional_embedding = normalization(encoder_channels)
                 self.norm_for_image_patch_positional_embedding = normalization(encoder_channels)
             else:
                 self.norm_for_obj_class_embedding = normalization(encoder_channels)
+                # self.norm_for_obj_name_embedding = normalization(encoder_channels)
                 self.norm_for_layout_positional_embedding = normalization(int(channels * self.channels_scale_for_positional_embedding))
                 self.norm_for_image_patch_positional_embedding = normalization(int(channels * self.channels_scale_for_positional_embedding))
 
@@ -433,6 +595,33 @@ class ObjectAwareCrossAttention(nn.Module):
         :return:
             extra_output: N x L2 x 3 x ds x ds
         '''
+        if self.use_checkpoint:
+            # checkpoint는 순수 텐서 입출력만 지원하므로 dict를 풀어서 전달
+            patch_key = 'image_patch_bbox_embedding_for_resolution{}'.format(self.resolution)
+            output = th.utils.checkpoint.checkpoint(
+                self._forward_ckpt,
+                x,
+                cond_kwargs['xf_out'],
+                cond_kwargs['obj_class_embedding'],
+                cond_kwargs['obj_bbox_embedding'],
+                cond_kwargs[patch_key],
+                use_reentrant=False,
+            )
+            return output, None  # extra_output(attention embeddings)은 checkpoint 시 생략
+        return self._forward(x, cond_kwargs)
+
+    def _forward_ckpt(self, x, xf_out, obj_class_emb, obj_bbox_emb, patch_emb):
+        """checkpoint용: dict 대신 개별 텐서를 받아 output만 반환."""
+        cond_kwargs = {
+            'xf_out': xf_out,
+            'obj_class_embedding': obj_class_emb,
+            'obj_bbox_embedding': obj_bbox_emb,
+            'image_patch_bbox_embedding_for_resolution{}'.format(self.resolution): patch_emb,
+        }
+        output, _ = self._forward(x, cond_kwargs)
+        return output
+
+    def _forward(self, x, cond_kwargs):
         extra_output = None
         b, c, *spatial = x.shape
         x = x.reshape(b, c, -1)  # N x C x (HxW)
@@ -473,9 +662,15 @@ class ObjectAwareCrossAttention(nn.Module):
 
         # content embedding for layout
         if self.norm_for_obj_embedding is not None:
-            layout_content_embedding = (self.norm_for_obj_embedding(cond_kwargs['xf_out']) + self.norm_for_obj_class_embedding(cond_kwargs['obj_class_embedding'])) / 2
+            layout_obj_class_embedding = self.norm_for_obj_class_embedding(cond_kwargs['obj_class_embedding'])  # (N, encoder_channels, L2)
+            # layout_obj_name_embedding = self.norm_for_obj_name_embedding(cond_kwargs['obj_name_embedding'])  # (N, encoder_channels, L2)
+            # layout_content_embedding = (self.norm_for_obj_embedding(cond_kwargs['xf_out']) + layout_obj_class_embedding + layout_obj_name_embedding) / 3
+            layout_content_embedding = (self.norm_for_obj_embedding(cond_kwargs['xf_out']) + layout_obj_class_embedding) / 2
         else:
-            layout_content_embedding = (cond_kwargs['xf_out'] + self.norm_for_obj_class_embedding(cond_kwargs['obj_class_embedding'])) / 2
+            layout_obj_class_embedding = self.norm_for_obj_class_embedding(cond_kwargs['obj_class_embedding'])  # (N, encoder_channels, L2)
+            # layout_obj_name_embedding = self.norm_for_obj_name_embedding(cond_kwargs['obj_name_embedding'])  # (N, encoder_channels, L2)
+            # layout_content_embedding = (cond_kwargs['xf_out'] + self.norm_for_obj_class_embedding(cond_kwargs['obj_class_embedding']) + self.norm_for_obj_name_embedding(cond_kwargs['obj_name_embedding'])) / 3
+            layout_content_embedding = (cond_kwargs['xf_out'] + layout_obj_class_embedding) / 2
         k_layout_content_embedding, v_layout_content_embedding = self.layout_content_embedding_projector(layout_content_embedding).split(C, dim=1)  # 2 x (N x C x L2)
         k_layout_content_embedding = k_layout_content_embedding.reshape(bs * self.num_heads, C // self.num_heads, L2)  # (N // num_heads, C // num_heads, L2)
         v_layout_content_embedding = v_layout_content_embedding.reshape(bs * self.num_heads, C // self.num_heads, L2)  # (N // num_heads, C // num_heads, L2)
@@ -661,7 +856,7 @@ class LayoutDiffusionUNetModel(nn.Module):
             attention_ds,
             encoder_channels=None,
             dino_dim=768,
-            context_dim=256, 
+            context_dim=None, 
             dropout=0,
             channel_mult=(1, 2, 4, 8),
             conv_resample=True,
@@ -674,7 +869,7 @@ class LayoutDiffusionUNetModel(nn.Module):
             use_scale_shift_norm=False,
             resblock_updown=False,
             use_positional_embedding_for_attention=False,
-            use_spatial_transformer=True,
+            use_spatial_transformer=False,
             image_size=256,
             attention_block_type='GLIDE',
             num_attention_blocks=1,
@@ -684,7 +879,6 @@ class LayoutDiffusionUNetModel(nn.Module):
             norm_for_obj_embedding=False,
             num_pre_downsample=0,
             transformer_depth=1,
-            return_multiscale=True,
             legacy=True,
     ):
         super().__init__()
@@ -732,9 +926,6 @@ class LayoutDiffusionUNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
 
-        # multi-scale features index
-        self.return_multiscale = return_multiscale
-
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
@@ -759,11 +950,6 @@ class LayoutDiffusionUNetModel(nn.Module):
     
         # self.aligner = DINOBevAligner(c_dino=dino_dim, c_ctx=context_dim)
         self.seg_aligner = SegBEVAligner(**seg_bev_aligner)
-        
-        if self.return_multiscale:
-            self.multi_concat = MultiScaleConcatWeighted(in_chs=(model_channels, model_channels*2, model_channels*4, model_channels*4), 
-                                                out_dim=out_channels, 
-                                                mid=model_channels)
   
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
@@ -774,7 +960,6 @@ class LayoutDiffusionUNetModel(nn.Module):
         ds = 1
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
-            # for nr in range(num_res_blocks):
                 layers = [
                     ResBlock(
                         ch,
@@ -787,41 +972,26 @@ class LayoutDiffusionUNetModel(nn.Module):
                     )
                 ]
                 ch = int(mult * model_channels)
-                seg_dim = int(mult * context_dim)
                 if ds in attention_ds:
                     print('encoder attention layer: ds = {}, resolution = {}'.format(ds, self.image_size // ds))
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        #num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
                     for _ in range(self.num_attention_blocks):
-                        if ds in [1, 2]:
-                            layers.append(
-                                attention_block_fn(
-                                    ch,
-                                    use_checkpoint=use_checkpoint,
-                                    num_heads=num_heads,
-                                    num_head_channels=num_head_channels,
-                                    encoder_channels=encoder_channels,
-                                    ds=ds,
-                                    resolution=int(self.image_size // ds),
-                                    type='input',
-                                    use_positional_embedding=self.use_positional_embedding_for_attention,
-                                    use_key_padding_mask=self.use_key_padding_mask,
-                                    channels_scale_for_positional_embedding=self.channels_scale_for_positional_embedding,
-                                    norm_first=self.norm_first,
-                                    norm_for_obj_embedding=self.norm_for_obj_embedding
-                                )
+                        layers.append(
+                            attention_block_fn(
+                                ch,
+                                use_checkpoint=use_checkpoint,
+                                num_heads=num_heads,
+                                num_head_channels=num_head_channels,
+                                encoder_channels=encoder_channels,
+                                ds=ds,
+                                resolution=int(self.image_size // ds),
+                                type='input',
+                                use_positional_embedding=self.use_positional_embedding_for_attention,
+                                use_key_padding_mask=self.use_key_padding_mask,
+                                channels_scale_for_positional_embedding=self.channels_scale_for_positional_embedding,
+                                norm_first=self.norm_first,
+                                norm_for_obj_embedding=self.norm_for_obj_embedding
                             )
-                        elif ds == 4:
-                            layers.append(
-                                SpatialTransformer(
-                                    ch, num_heads, dim_head, depth=transformer_depth, context_dim=seg_dim)
-                            )
+                        )
                 # self.input_blocks.append(TimestepEmbedSequential(*layers))
                 block = TimestepEmbedSequential(*layers)
                 block.ctx_ds = ds    
@@ -853,17 +1023,7 @@ class LayoutDiffusionUNetModel(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
-        if num_head_channels == -1:
-            dim_head = ch // num_heads
-        else:
-            num_heads = ch // num_head_channels
-            dim_head = num_head_channels
-        if legacy:
-            #num_heads = 1
-            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-
         print('middle attention layer: ds = {}, resolution = {}'.format(ds, self.image_size // ds))
-        mid_ctx_dim = int(channel_mult[-1] * context_dim)
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -872,10 +1032,7 @@ class LayoutDiffusionUNetModel(nn.Module):
                 dims=dims,
                 use_checkpoint=use_checkpoint,
                 use_scale_shift_norm=use_scale_shift_norm,
-            ),       
-            SpatialTransformer(
-                ch, num_heads, dim_head, depth=transformer_depth, context_dim=mid_ctx_dim
-            ),                          
+            ),                           
             attention_block_fn(
                 ch,
                 use_checkpoint=use_checkpoint,
@@ -907,7 +1064,20 @@ class LayoutDiffusionUNetModel(nn.Module):
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
-                layers = [
+                if i == 0 or i == 2:  
+                    layers = [
+                        BFDNResBlock(
+                            ch + ich,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(model_channels * mult),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            seg_channels=seg_channels[level],
+                        )
+                    ]
+                else:
+                    layers = [
                         ResBlock(
                             ch + ich,
                             time_embed_dim,
@@ -919,42 +1089,26 @@ class LayoutDiffusionUNetModel(nn.Module):
                         )
                     ]
                 ch = int(model_channels * mult)
-                seg_dim = int(context_dim * mult)
                 if ds in attention_ds:
                     print('decoder attention layer: ds = {}, resolution = {}'.format(ds, self.image_size // ds))
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        #num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
                     for _ in range(self.num_attention_blocks):
-                        if ds in [1, 2]:
-                            layers.append(
-                                attention_block_fn(
-                                    ch,
-                                    use_checkpoint=use_checkpoint,
-                                    num_heads=num_heads_upsample,
-                                    num_head_channels=num_head_channels,
-                                    encoder_channels=encoder_channels,
-                                    ds=ds,
-                                    resolution=int(self.image_size // ds),
-                                    type='output',
-                                    use_positional_embedding=self.use_positional_embedding_for_attention,
-                                    use_key_padding_mask=self.use_key_padding_mask,
-                                    channels_scale_for_positional_embedding=self.channels_scale_for_positional_embedding,
-                                    norm_first=self.norm_first,
-                                    norm_for_obj_embedding=self.norm_for_obj_embedding
-                                )
+                        layers.append(
+                            attention_block_fn(
+                                ch,
+                                use_checkpoint=use_checkpoint,
+                                num_heads=num_heads_upsample,
+                                num_head_channels=num_head_channels,
+                                encoder_channels=encoder_channels,
+                                ds=ds,
+                                resolution=int(self.image_size // ds),
+                                type='output',
+                                use_positional_embedding=self.use_positional_embedding_for_attention,
+                                use_key_padding_mask=self.use_key_padding_mask,
+                                channels_scale_for_positional_embedding=self.channels_scale_for_positional_embedding,
+                                norm_first=self.norm_first,
+                                norm_for_obj_embedding=self.norm_for_obj_embedding
                             )
-                        elif ds == 4:
-                            layers.append(
-                                SpatialTransformer(
-                                    ch, num_heads, dim_head, depth=transformer_depth, context_dim=seg_dim
-                                )
-                            )
+                        )
                       
                 ctx_ds = ds  # capture ds before potential halving for ctx selection
                 if level and i == num_res_blocks:
@@ -998,7 +1152,26 @@ class LayoutDiffusionUNetModel(nn.Module):
         self.layout_encoder.convert_to_fp16()
         self.seg_aligner.apply(convert_module_to_f16)
 
-    def forward(self, x, timesteps, img_metas, seg_cond, obj_class=None, obj_bbox=None, obj_mask=None, is_valid_obj=None, obj_name=None, **kwargs):
+    def enable_gradient_checkpointing(self):
+        """
+        Enable gradient checkpointing on all ResBlock / BFDNResBlock / AttentionBlock modules.
+        Called by train script when --gradient_checkpointing is set.
+        """
+        def _set(m):
+            if isinstance(m, (ResBlock, BFDNResBlock, AttentionBlock, ObjectAwareCrossAttention)):
+                m.use_checkpoint = True
+        self.apply(_set)
+
+    def encode_seg(self, seg_cond, img_metas, depth_maps=None):
+        """
+        Project the multi-view seg map to multi-scale semantic BEV maps.
+
+        Timestep-independent, so it can be computed once and reused across all
+        denoising steps (see `seg_bev_maps` in `forward`).
+        """
+        return self.seg_aligner(seg_cond, img_metas, depth_maps=depth_maps)
+
+    def forward(self, x, timesteps, img_metas, seg_cond, obj_class=None, obj_bbox=None, obj_mask=None, is_valid_obj=None, obj_name=None, depth_maps=None, seg_bev_maps=None, **kwargs):
         hs, extra_outputs = [], []
 
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
@@ -1008,53 +1181,46 @@ class LayoutDiffusionUNetModel(nn.Module):
             obj_bbox=obj_bbox,
             obj_mask=obj_mask,
             is_valid_obj=is_valid_obj,
-            obj_name=obj_name
+            obj_name=obj_name,
         )
-        
-        seg_bev_maps = self.seg_aligner(seg_cond, img_metas) # (B, C, H, W)
         
         xf_proj, xf_out = layout_outputs["xf_proj"], layout_outputs["xf_out"]  # xf_proj: (B, 1024), xf_out: (B, 256, 300)
 
         emb = emb + xf_proj.to(emb) # emb: (B, 1024)
 
-        out_list = []
+        if seg_bev_maps is None:
+            seg_bev_maps = self.encode_seg(seg_cond, img_metas, depth_maps=depth_maps) # (B, C, H, W)
         
         h = x.type(self.dtype)  # h: (B, C, H, W)
         for module in self.downsample_blocks:
             h = module(h) 
+            
         # Encoder
         for module in self.input_blocks:
-            seg_bev = self._select_ctx(seg_bev_maps, module).flatten(2).transpose(1, 2)
-            h, extra_output = module(h, emb, layout_outputs, seg_bev) 
+            h, extra_output = module(h, emb, layout_outputs) 
             if extra_output is not None:
                 extra_outputs.append(extra_output)
             hs.append(h)
         
         # Middle block
-        seg_bev_mid = self._select_ctx(seg_bev_maps, self.middle_block).flatten(2).transpose(1, 2)
-        h, extra_output = self.middle_block(h, emb, layout_outputs, seg_bev_mid)
+        h, extra_output = self.middle_block(h, emb, layout_outputs)
         if extra_output is not None:
             extra_outputs.append(extra_output)
 
         # Decoder
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            seg_bev = self._select_ctx(seg_bev_maps, module).flatten(2).transpose(1, 2)
+            seg_bev = self._select_ctx(seg_bev_maps, module)
             h, extra_output = module(h, emb, layout_outputs, seg_bev)
             if extra_output is not None:
                 extra_outputs.append(extra_output)
 
         h = h.type(x.dtype)
-        final = self.out(h)
+        h = self.out(h)
         
         for module in self.upsample_blocks:
             h = module(h)
-
-        if self.return_multiscale:
-            multi_feat = self.multi_concat(out_list[::-1]) 
-            return final, multi_feat, out_list
-        else:
-            return final
+        return [h]
     
     def save_pretrained(self, save_directory):
         if os.path.isfile(save_directory):
@@ -1084,6 +1250,22 @@ class LayoutDiffusionUNetModel(nn.Module):
             print('successfully load the entire model')
         except:
             print('not successfully load the entire model, try to load part of model')
+            model_keys = set(self.state_dict().keys())
+            ckpt_keys = set(state_dict.keys())
+            missing = model_keys - ckpt_keys
+            unexpected = ckpt_keys - model_keys
+            shape_mismatch = {
+                k for k in model_keys & ckpt_keys
+                if self.state_dict()[k].shape != state_dict[k].shape
+            }
+            if missing:
+                print(f'  [Missing keys ({len(missing)})]:', *sorted(missing), sep='\n    ')
+            if unexpected:
+                print(f'  [Unexpected keys ({len(unexpected)})]:', *sorted(unexpected), sep='\n    ')
+            if shape_mismatch:
+                print(f'  [Shape mismatch keys ({len(shape_mismatch)})]:', sep='')
+                for k in sorted(shape_mismatch):
+                    print(f'    {k}: model={tuple(self.state_dict()[k].shape)}, ckpt={tuple(state_dict[k].shape)}')
             self.load_state_dict(state_dict, strict=False)
 
 

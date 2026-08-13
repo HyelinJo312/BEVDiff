@@ -206,6 +206,8 @@ class BasicTransformerBlock(nn.Module):
         self.checkpoint = checkpoint
 
     def forward(self, x, context=None):
+        if context is None:
+            return checkpoint(self._forward, (x,), self.parameters(), self.checkpoint)
         return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint) ## suraj: error happening in kitti at this line
 
     def _forward(self, x, context=None):

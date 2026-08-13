@@ -50,12 +50,11 @@ queue_length = 3 # each sequence contains `queue_length` frames.
 num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
-use_layout = True
 use_semantics = True
+use_depth = False  # DA3 depth maps for FB-BEV depth consistency in BEV aligners
 
 unet = dict(
-    # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
-    type='layout_diffusion.layout_seg_diffusion_unet_v2.LayoutDiffusionUNetModel',
+    type='layout_diffusion.dinoseg_diffusion_unet.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -75,12 +74,29 @@ unet = dict(
         resblock_updown=True,
         use_spatial_transformer=True,
         num_pre_downsample=0,
-        attention_ds=[ 4, 2, 1 ],
+        attention_ds=[ 4, 2 ],
         channel_mult=[ 1, 2, 4 ],
         dropout=0.0,
         use_checkpoint=False,
         use_positional_embedding_for_attention=True,
         attention_block_type='ObjectAwareCrossAttention',
+        # ---- DINOv2 feature → BEV aligner (with FB-BEV depth consistency) ----
+        dino_bev_aligner=dict(
+            bev_h=bev_h_,
+            bev_w=bev_w_,
+            cam_view=6,
+            pc_range=point_cloud_range,
+            num_points_in_pillar=4,
+            c_dino=768,            # DINOv2 feature dim
+            c_ctx=256,             # output channels (== context_dim)
+            # channel_mult=[1, 2, 4],
+            final_dim=(480, 800),  # fallback H x W; GetDINOV2Feat geom['input_hw'] is preferred
+            use_bev_pos_embed=True,
+            depth_consistency_mode='gaussian',  # gaussian | bin_linear | None
+            depth_consistency_sigma=2.0,
+            d_bound=[2.0, 58.0, 0.5],
+        ),
+        # ---- Segmentation one-hot → BEV aligner (with FB-BEV depth consistency) ----
         seg_bev_aligner=dict(
             bev_h=bev_h_,
             bev_w=bev_w_,
@@ -92,38 +108,12 @@ unet = dict(
             channel_mult=[1, 2, 4],
             final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
             v_min_frac=0.4,        # 이미지 상단 30%(하늘/배경) 배제 → 도로/객체 영역 위주 샘플링
+            depth_consistency_mode='gaussian',  # gaussian | bin_linear | None
+            depth_consistency_sigma=2.0,
+            d_bound=[2.0, 58.0, 0.5],
         ),
-        layout_encoder=dict(
-            type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
-            parameters=dict(
-                used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
-                layout_length=num_bboxes,
-                num_classes_for_layout_object=num_classes,
-                mask_size_for_layout_object=0,
-                hidden_dim=256,
-                output_dim=1024, # model_channels x 4
-                num_layers=6,
-                num_heads=8,
-                use_final_ln=True,
-                use_positional_embedding=False,
-                resolution_to_attention=[12, 25, 50], #[ 8, 16, 32 ],
-                use_key_padding_mask=False,
-                use_3d_bbox=use_3d_bbox),
-            ),
-        ),
-)
-
-dino_bev_aligner = dict(
-    type='projects.bevdiffuser.dino_bev_initial.DINOBevAligner',
-    parameters=dict(
-        bev_h=bev_h_,
-        bev_w=bev_w_,
-        pc_range=point_cloud_range,
-        num_points_in_pillar=4,
-        output_channels=128,
-        c_dino=768,
-        num_key_frames=2,  # _dim_ // output_channels = 256 // 128
-    )
+        # NOTE: dinoseg_diffusion_unet has no layout_encoder path 
+    ),
 )
 
 
@@ -250,9 +240,9 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
-dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-# data_root = '../../data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+dataset_type = 'CustomNuScenesDiffusionDataset_seg_depth'
+data_root = '../../data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 
@@ -296,9 +286,10 @@ data = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
-        use_layout=use_layout,
         use_semantics=use_semantics,
+        use_depth=use_depth,
         semantic_path=data_root + 'nuscenes_semantic',
+        depth_path=data_root + 'nuscenes_depth_da3',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -312,17 +303,19 @@ data = dict(
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-             use_layout=use_layout,
              use_semantics=use_semantics,
+             use_depth=use_depth,
              semantic_path=data_root + 'nuscenes_semantic_val',
+             depth_path=data_root + 'nuscenes_depth_da3',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-              use_layout=use_layout,
               use_semantics=use_semantics,
+              use_depth=use_depth,
               semantic_path=data_root + 'nuscenes_semantic_val',
+              depth_path=data_root + 'nuscenes_depth_da3',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),

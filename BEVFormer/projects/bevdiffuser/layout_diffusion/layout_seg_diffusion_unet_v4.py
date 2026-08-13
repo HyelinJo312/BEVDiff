@@ -47,6 +47,7 @@ from .multiscale_fusion import *
 # from .seg_bev_aligner_one_hot import SegBEVAligner 
 # from .seg_bev_aligner_v3 import SegBEVAligner   # G-SAM text prompt -> CLIP embedding 활용
 from .seg_bev_aligner_one_hot_da3 import SegBEVAligner
+# from .seg_bev_aligner_one_hot_v3 import SegBEVAligner
 
 def convert_module_to_f16(l):
     """
@@ -117,6 +118,11 @@ class Upsample(nn.Module):
 
     def forward(self, x):
         assert x.shape[1] == self.channels
+        # PyTorch 1.10's upsample_nearest2d CUDA kernel lacks BFloat16 support;
+        # cast to fp32 around interpolate and restore the original dtype.
+        orig_dtype = x.dtype
+        if orig_dtype == torch.bfloat16:
+            x = x.float()
         if self.dims == 3:
             if self.out_size is None:
                 x = F.interpolate(
@@ -131,6 +137,8 @@ class Upsample(nn.Module):
                 x = F.interpolate(x, scale_factor=2, mode="nearest")
             else:
                 x = F.interpolate(x, size=self.out_size, mode="nearest")
+        if x.dtype != orig_dtype:
+            x = x.to(orig_dtype)
         if self.use_conv:
             x = self.conv(x)
         return x

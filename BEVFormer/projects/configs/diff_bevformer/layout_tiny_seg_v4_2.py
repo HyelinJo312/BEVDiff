@@ -5,6 +5,9 @@
 # less encoder layers: 6 -> 3
 # smaller input size: 1600*900 -> 800*450
 # multi-scale feautres -> single scale features (C5)
+'''
+FDN without Gate
+'''
 
 
 _base_ = [
@@ -67,7 +70,7 @@ use_semantics = True
 use_depth = False
 
 unet = dict(
-    type='projects.bevdiffuser.layout_diffusion.layout_seg_diffusion_unet_v4.LayoutDiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.layout_seg_diffusion_unet_v4_2.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -130,8 +133,8 @@ bev_diffuser_cfg=dict(
     unet_checkpoint_dir=None,
     pretrained_model_name_or_path="stabilityai/stable-diffusion-2-1",
     prediction_type="sample",
-    noise_timesteps=100,
-    denoise_timesteps=100,
+    noise_timesteps=5,
+    denoise_timesteps=5,
     num_inference_steps=5,
     use_classifier_guidence=False)
 
@@ -140,10 +143,8 @@ find_unused_parameters=False
 train_task_decoder = True
 
 model = dict(
-    type='DiffBEVFormerSegV2',
-    use_aux_seg=True,           # ← 새 옵션
-    aux_seg_num_classes=16,     # ← seg_aligner와 동일
-    aux_seg_weight=10,         # ← 튜닝 대상
+    type='DiffBEVFormerSeg',
+    use_proj=False,
     use_grid_mask=True,
     video_test_mode=True,
     pretrained=dict(img='torchvision://resnet50'),
@@ -366,6 +367,7 @@ optimizer = dict(
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.5),
+            # 'mgd_generation': dict(lr_mult=2.0, decay_mult=0.0),
         }),
     weight_decay=0.01)
 

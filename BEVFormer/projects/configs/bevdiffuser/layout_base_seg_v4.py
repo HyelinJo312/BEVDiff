@@ -22,9 +22,8 @@ voxel_size = [0.2, 0.2, 8]
 
 
 
-
 img_norm_cfg = dict(
-    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+    mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)
 
 # For nuScenes we usually do 10-class detection
 class_names = [
@@ -53,10 +52,10 @@ input_modality = dict(
 _dim_ = 256
 _pos_dim_ = _dim_//2
 _ffn_dim_ = _dim_*2
-_num_levels_ = 1
-bev_h_ = 50
-bev_w_ = 50
-queue_length = 3 # each sequence contains `queue_length` frames.
+_num_levels_ = 4
+bev_h_ = 200
+bev_w_ = 200
+queue_length = 4 # each sequence contains `queue_length` frames.
 
 num_bboxes = 300
 # num_classes = len(class_names) + 2 
@@ -67,7 +66,8 @@ use_semantics = True
 use_depth = False
 
 unet = dict(
-    type='projects.bevdiffuser.layout_diffusion.layout_seg_diffusion_unet_v4.LayoutDiffusionUNetModel',
+    # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
+    type='layout_diffusion.layout_seg_diffusion_unet_v4.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -85,7 +85,7 @@ unet = dict(
         num_attention_blocks=1,
         resblock_updown=True,
         use_spatial_transformer=False,
-        num_pre_downsample=0,
+        num_pre_downsample=2,
         attention_ds=[ 4, 2, 1 ],
         channel_mult=[ 1, 2, 4 ],
         dropout=0.0,
@@ -93,22 +93,21 @@ unet = dict(
         use_positional_embedding_for_attention=True,
         attention_block_type='ObjectAwareCrossAttention',
         seg_bev_aligner=dict(
-            bev_h=bev_h_,
-            bev_w=bev_w_,
+            bev_h=50,
+            bev_w=50,
             pc_range=point_cloud_range,
-            num_points_in_pillar=4,
+            num_points_in_pillar=6,  # num_poitns: 4 -> 6
             num_classes=16,
             # embed_dim=64, # 256
             emb_channels=256,
             channel_mult=[1, 2, 4],
-            final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
+            final_dim=(928, 1600),  # H x W after image preprocessing
             v_min_frac=0,
         ),
         layout_encoder=dict(
-            type='projects.bevdiffuser.layout_diffusion.layout_encoder.LayoutTransformerEncoder',
+            type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
             parameters=dict(
                 used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
-                # used_condition_types=['obj_name', 'obj_bbox', 'is_valid_obj'],
                 layout_length=num_bboxes,
                 num_classes_for_layout_object=num_classes,
                 mask_size_for_layout_object=0,
@@ -122,49 +121,31 @@ unet = dict(
                 use_key_padding_mask=False,
                 use_3d_bbox=use_3d_bbox),
             ),
-    ),
+        ),
 )
 
-bev_diffuser_cfg=dict(
-    unet_cfg=unet,
-    unet_checkpoint_dir=None,
-    pretrained_model_name_or_path="stabilityai/stable-diffusion-2-1",
-    prediction_type="sample",
-    noise_timesteps=100,
-    denoise_timesteps=100,
-    num_inference_steps=5,
-    use_classifier_guidence=False)
-
-find_unused_parameters=False
-
-train_task_decoder = True
-
 model = dict(
-    type='DiffBEVFormerSeg',
-    use_proj=True,  # original raw MSE (use_proj=True → A+B: projector + GroupNorm)
-    use_aux_seg=True,                  # Phase 2: aux semantic supervision on Student backbone
-    aux_seg_num_classes=16,            # must match seg_aligner.num_classes (→ 17-channel softmax)
-    aux_seg_weight=5.0,                # KL loss weight (effective ~0.5 after _parse_losses_mix)
-    aux_seg_valid_threshold=0.2,       # mask out FoV-occluded cells (degenerate GT prob)
+    type='BEVFormer',
     use_grid_mask=True,
     video_test_mode=True,
-    pretrained=dict(img='torchvision://resnet50'),
     img_backbone=dict(
         type='ResNet',
-        depth=50,
+        depth=101,
         num_stages=4,
-        out_indices=(3,),
+        out_indices=(1, 2, 3),
         frozen_stages=1,
-        norm_cfg=dict(type='BN', requires_grad=False),
+        norm_cfg=dict(type='BN2d', requires_grad=False),
         norm_eval=True,
-        style='pytorch'),
+        style='caffe',
+        dcn=dict(type='DCNv2', deform_groups=1, fallback_on_stride=False), # original DCNv2 will print log when perform load_state_dict
+        stage_with_dcn=(False, False, True, True)),
     img_neck=dict(
         type='FPN',
-        in_channels=[2048],
+        in_channels=[512, 1024, 2048],
         out_channels=_dim_,
         start_level=0,
         add_extra_convs='on_output',
-        num_outs=_num_levels_,
+        num_outs=4,
         relu_before_extra_convs=True),
     pts_bbox_head=dict(
         type='BEVFormerHead',
@@ -184,7 +165,7 @@ model = dict(
             embed_dims=_dim_,
             encoder=dict(
                 type='BEVFormerEncoder',
-                num_layers=3,
+                num_layers=6,
                 pc_range=point_cloud_range,
                 num_points_in_pillar=4,
                 return_intermediate=False,
@@ -266,11 +247,9 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
+# dataset_type = 'CustomNuScenesDiffusionDataset_layout'
 dataset_type = 'CustomNuScenesDiffusionDataset_layout_seg'
-# data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/'
-# info_root = "/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/bevformer_infos/" # bevformer info
-# data_root = '/fs/scratch/rb_bd_dlp_rng-dl01_cr_AID_employees/archive/activities/aid_005/nuScenes/nuscenes/'
-data_root = 'data/nuscenes/'
+data_root = '../../data/nuscenes/'
 # data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
@@ -282,7 +261,6 @@ train_pipeline = [
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='RandomScaleImageMultiViewImage', scales=[0.5]),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(type='CustomCollect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img'])
@@ -291,25 +269,25 @@ train_pipeline = [
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-   
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
+    dict(type='PadMultiViewImage', size_divisor=32),
     dict(
         type='MultiScaleFlipAug3D',
         img_scale=(1600, 900),
         pts_scale_ratio=1,
         flip=False,
         transforms=[
-            dict(type='RandomScaleImageMultiViewImage', scales=[0.5]),
-            dict(type='PadMultiViewImage', size_divisor=32),
             dict(
                 type='DefaultFormatBundle3D',
                 class_names=class_names,
                 with_label=False),
-            dict(type='CustomCollect3D', keys=['img'])
+            dict(type='CustomCollect3D', keys=['gt_bboxes_3d', 'gt_labels_3d','img'])
         ])
 ]
 
+
 data = dict(
-    samples_per_gpu=4,
+    samples_per_gpu=1,
     workers_per_gpu=4,
     train=dict(
         type=dataset_type,
@@ -355,8 +333,8 @@ data = dict(
             #   depth_path=data_root + 'nuscenes_depth_da3',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, 
-              total_class=total_class,   # det + seg class
-              seg_class=seg_class,  
+              total_class=total_class,  # det + seg class
+              seg_class=seg_class,
               modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
@@ -364,11 +342,10 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=3e-4,
+    lr=2e-4,
     paramwise_cfg=dict(
         custom_keys={
-            'img_backbone': dict(lr_mult=0.5),
-            # 'bev_distill_proj': dict(lr_mult=2.0, decay_mult=0.0), 
+            'img_backbone': dict(lr_mult=0.1),
         }),
     weight_decay=0.01)
 
@@ -381,9 +358,9 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=12, pipeline=test_pipeline)
+evaluation = dict(interval=1, pipeline=test_pipeline)
 
-runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
+runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
 log_config = dict(
     interval=50,
@@ -392,8 +369,4 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=6)
-
-custom_hooks = [
-    dict(type='UpdateTarget', epoch_interval=0)
-]
+checkpoint_config = dict(interval=1)

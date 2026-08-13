@@ -1,40 +1,40 @@
 #!/usr/bin/env bash
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
 export OPENBLAS_NUM_THREADS=1     # prevent OpenBLAS from spawning extra threads
 export OPENCV_NUM_THREADS=1       # let OpenCV auto-detect (0 = use OMP setting)
-export MAX_JOBS=8                 # 빌드 job 상한 (과도한 fork 방지)
+export MAX_JOBS=16                 # 빌드 job 상한 (과도한 fork 방지)
 export TCNN_CUDA_ARCHITECTURES=86 # Ampere (A6000)
 
 # ── NCCL / inter-GPU communication ──────────────────────────────────────────
 export NCCL_IB_DISABLE=1          # no InfiniBand on this server
-# export NCCL_P2P_DISABLE=0         # GPU 0-3: 같은 NUMA node → NODE 토폴로지 P2P 활용
+export NCCL_P2P_DISABLE=0         # GPU 0-3: 같은 NUMA node → NODE 토폴로지 P2P 활용
 # export NCCL_SOCKET_NTHREADS=4     # NUMA 격리 후 소켓 스레드 복원
 # export NCCL_NSOCKS_PERTHREAD=2    # 스레드당 소켓 수
 
 GPUS=4
 PORT=${PORT:-29503}
 
-BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
-BEV_CHECKPOINT="../../ckpts/bevformer_tiny_epoch_24.pth"
+BEV_CONFIG="../configs/bevdiffuser/layout_base.py"
+BEV_CHECKPOINT="../../ckpts/bevformer_r101_dcn_24ep.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
-PRETRAINED_UNET_CHECKPOINT=None
+PRETRAINED_UNET_CHECKPOINT="../../../results/BEVDiffuser_BEVFormer_tiny_original_bs2/checkpoint-50000"
 
 # set up wandb project
 PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_BEVFormer_tiny_original_bs4
+RUN_NAME=BEVDiffuser_BEVFormer_base_original_bs2
 
 # checkpoint settings
 CHECKPOINT_STEP=10000
-CHECKPOINT_LIMIT=5
+CHECKPOINT_LIMIT=3
 
 # allow 500 extra steps to be safe
 MAX_TRAINING_STEPS=50000
-TRAIN_BATCH_SIZE=4
+TRAIN_BATCH_SIZE=2
 DATALOADER_NUM_WORKERS=4
 GRADIENT_ACCUMMULATION_STEPS=1
 

@@ -4,9 +4,9 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 # ── CPU thread budget (NUMA node 0: CPU 0-15, 32-47 = 32 logical cores) ─────
 # taskset 고정 범위 내: (1 main + 4 workers) × OMP=4 = 20 threads → 여유 있음
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export NUMEXPR_NUM_THREADS=4
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1     # prevent OpenBLAS from spawning extra threads
 export OPENCV_NUM_THREADS=1       # 1=단일 스레드 유지 (스레드 폭발로 인한 극심한 지연 방지)
 export MAX_JOBS=16                 # parallel build jobs (half server)
@@ -25,21 +25,21 @@ export NCCL_P2P_DISABLE=0            # GPU 0-3: 같은 NUMA node → NODE 토폴
 GPUS=4
 PORT=${PORT:-29501}   # train_seg_v2 전용 포트 (v3는 29503)
 
-BEV_CONFIG="../configs/bevdiffuser/layout_tiny_seg_v4.py"
+BEV_CONFIG="../configs/bevdiffuser/layout_tiny_seg_v4_4.py"
 BEV_CHECKPOINT="../../ckpts/bevformer_tiny_epoch_24.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
 PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_tiny_seg_one-hot_v11_bs4
+RUN_NAME=BEVDiffuser_tiny_seg_one-hot_ablation_semantic-BEV
 # checkpoint settings
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=3
 
 # allow 500 extra steps to be safe
 MAX_TRAINING_STEPS=50000
-TRAIN_BATCH_SIZE=4
+TRAIN_BATCH_SIZE=2
 DATALOADER_NUM_WORKERS=4
 GRADIENT_ACCUMMULATION_STEPS=1
 
@@ -83,8 +83,6 @@ torchrun --nproc_per_node $GPUS \
     --prediction_type $PREDICTION_TYPE \
     --task_loss_scale $TASK_LOSS_SCALE \
     --report_to 'tensorboard' \
-    # --resume_from_checkpoint $RESUME_FROM
-    # --gradient_checkpointing
     # --resume_from_checkpoint $RESUME_FROM
     # --gradient_checkpointing
 

@@ -26,6 +26,9 @@ import numpy as np
 import torch
 torch.backends.cudnn.enabled = False
 # torch.backends.cudnn.benchmark = True
+# torch.backends.cudnn.benchmark = True
+# torch.backends.cudnn.allow_tf32 = True
+# torch.backends.cuda.matmul.allow_tf32 = True
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
@@ -75,6 +78,7 @@ def train():
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=None,
+        # mixed_precision="bf16",
         log_with=args.report_to,
         project_config=accelerator_project_config,
     )
@@ -120,6 +124,12 @@ def train():
         
     bev_model = get_bev_model(args)
 
+    # mmcv.utils.get_logger() silences root StreamHandlers to ERROR (to suppress
+    # rank>0 DDP noise), which also drops our logger.info() messages. Restore.
+    for h in logging.getLogger().handlers:
+        if type(h) is logging.StreamHandler:
+            h.setLevel(logging.INFO)
+
     # Freeze vae and text_encoder
     bev_model.requires_grad_(False)
     if args.task_loss_scale != 0:
@@ -136,7 +146,7 @@ def train():
         return loss
     
     unet = build_unet(bev_cfg.unet)
-    num_fdn = sum(1 for m in unet.modules() if type(m).__name__ == 'FDNResBlock')
+    num_fdn = sum(1 for m in unet.modules() if type(m).__name__ == 'BFDNResBlock')
     if args.pretrained_unet_checkpoint is not None and (os.path.isfile(args.pretrained_unet_checkpoint) or os.path.isdir(args.pretrained_unet_checkpoint)):
         unet.from_pretrained(args.pretrained_unet_checkpoint, subfolder="unet")
         # train only the downsample and upsample layers
@@ -322,7 +332,8 @@ def train():
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Is SD21: {is_training_sd21}")
     logger.info(f'[UNet] FDNResBlock count: {num_fdn}')
-    logger.info(f'[LayoutEncoder] Class names: {bev_cfg.total_class}') 
+    if bev_cfg.total_class is not None:
+        logger.info(f'[LayoutEncoder] Class names: {bev_cfg.total_class}') 
     
     global_step = 0
     first_epoch = 0
@@ -498,8 +509,8 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    # if global_step % args.checkpointing_steps == 0 and global_step > 20000:
-                    if global_step % args.checkpointing_steps == 0:
+                    if global_step % args.checkpointing_steps == 0 and global_step in [30000, 50000]:
+                    # if global_step % args.checkpointing_steps == 0:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')

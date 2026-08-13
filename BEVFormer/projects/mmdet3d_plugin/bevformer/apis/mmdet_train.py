@@ -73,7 +73,7 @@ def custom_train_detector(model,
             # cfg.gpus will be ignored if distributed
             len(cfg.gpu_ids),
             dist=distributed,
-            seed=cfg.seed,
+            seed=cfg.seed,     
             shuffler_sampler=cfg.data.shuffler_sampler,  # dict(type='DistributedGroupSampler'),
             nonshuffler_sampler=cfg.data.nonshuffler_sampler,  # dict(type='DistributedSampler'),
         ) for ds in dataset

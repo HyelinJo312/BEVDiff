@@ -589,7 +589,7 @@ def evaluate(
                 agg="l1", whiten=True, smooth_sigma=0.8,
                 joint_clip=(2.0, 98.0), gamma=1.0,
                 bev_cmap="viridis", bev_interp="bilinear",
-                save_format="pdf",
+                save_format="png",
             )
 
         if rank == 0:

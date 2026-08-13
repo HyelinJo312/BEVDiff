@@ -126,11 +126,12 @@ def train():
         noise_scheduler.register_to_config(prediction_type=args.prediction_type)
         DDIM_scheduler.register_to_config(prediction_type=args.prediction_type)
         
-    bev_model, dino_aligner = get_bev_model_v2(args, bev_cfg, use_dino_bev=True)
+    # bev_model, dino_aligner = get_bev_model_v2(args, bev_cfg, use_dino_bev=True)
+    bev_model = get_bev_model(args)
 
     # Freeze vae and text_encoder
     bev_model.requires_grad_(False)
-    dino_aligner.requires_grad_(False)
+    # dino_aligner.requires_grad_(False)
     if args.task_loss_scale != 0:
         bev_model.module.pts_bbox_head.transformer.decoder.requires_grad_(True)
         bev_model.module.pts_bbox_head.transformer.reference_points.requires_grad_(True)
@@ -144,7 +145,10 @@ def train():
         loss, _ = bev_model.module._parse_losses(losses)
         return loss
     
-    unet = build_unet(bev_cfg.unet)
+    # dinoseg_diffusion_unet has no layout_encoder param → use build_unet_v2
+    # (build_unet would construct & pass layout_encoder, which this UNet rejects)
+    unet = build_unet_v2(bev_cfg.unet)
+    num_fdn = sum(1 for m in unet.modules() if type(m).__name__ == 'BFDNResBlock')
     if args.pretrained_unet_checkpoint is not None and (os.path.isfile(args.pretrained_unet_checkpoint) or os.path.isdir(args.pretrained_unet_checkpoint)):
         unet.from_pretrained(args.pretrained_unet_checkpoint, subfolder="unet")
         # train only the downsample and upsample layers
@@ -201,16 +205,14 @@ def train():
     )
     
     with accelerator.main_process_first():
-        train_dataset = build_dataset(bev_cfg.data.train, 
+        train_dataset = build_dataset(bev_cfg.data.train,
                                       default_args={
                                           'pc_range': bev_cfg.point_cloud_range,
                                           'use_3d_bbox': bev_cfg.use_3d_bbox,
                                           'num_classes': bev_cfg.num_classes,
                                           'num_bboxes': bev_cfg.num_bboxes,
-                                          'use_layout': False,
-                                          'use_semantics': True,
                                       })
-        
+
         bev_cfg.data.test.load_annos = True
         val_dataset = build_dataset(bev_cfg.data.test,
                                     default_args={
@@ -218,8 +220,6 @@ def train():
                                         'use_3d_bbox': bev_cfg.use_3d_bbox,
                                         'num_classes': bev_cfg.num_classes,
                                         'num_bboxes': bev_cfg.num_bboxes,
-                                        'use_layout': False,
-                                        'use_semantics': True,
                                     })
         
       
@@ -244,35 +244,6 @@ def train():
         nonshuffler_sampler=bev_cfg.data.nonshuffler_sampler,
     )
 
-    def get_condition(batch):
-        cond = {}
-        
-        if 'layout_obj_classes' in batch:
-            cond['obj_class'] = torch.stack(batch['layout_obj_classes'].data[0])
-        if 'layout_obj_bboxes' in batch:
-            cond['obj_bbox'] = torch.stack(batch['layout_obj_bboxes'].data[0])
-        if 'layout_obj_is_valid' in batch:
-            cond['is_valid_obj'] = torch.stack(batch['layout_obj_is_valid'].data[0]) 
-        if 'layout_obj_names' in batch:
-            cond['obj_name'] = torch.stack(batch['layout_obj_names'].data[0])
-        
-        if np.random.rand() < args.uncond_prob:
-            if isinstance(unet.module, LayoutDiffusionUNetModel):
-                if 'obj_class' in unet.module.layout_encoder.used_condition_types:
-                    cond['obj_class'] = torch.ones_like(cond['obj_class']).fill_(unet.module.layout_encoder.num_classes_for_layout_object - 1)
-                    cond['obj_class'][:, 0] = unet.module.layout_encoder.num_classes_for_layout_object - 2
-                if 'obj_name' in unet.module.layout_encoder.used_condition_types:
-                    cond['obj_name'] = torch.stack(batch['default_obj_names'].data[0])
-                if 'obj_bbox' in unet.module.layout_encoder.used_condition_types:
-                    cond['obj_bbox'] = torch.zeros_like(cond['obj_bbox'])
-                    if unet.module.layout_encoder.use_3d_bbox:
-                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 0, 1, 1, 1, 0, 0, 0])
-                    else:
-                        cond['obj_bbox'][:, 0] = torch.FloatTensor([0, 0, 1, 1])
-                cond['is_valid_obj'] = torch.zeros_like(cond['is_valid_obj'])
-                cond['is_valid_obj'][:, 0] = 1.0  
-                 
-        return cond
         
     def get_dino_cond(dino_out):
         if np.random.rand() < args.uncond_prob:
@@ -351,6 +322,7 @@ def train():
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Is SD21: {is_training_sd21}")
+    logger.info(f'[UNet] FDNResBlock count: {num_fdn}')
 
     global_step = 0
     first_epoch = 0
@@ -387,27 +359,12 @@ def train():
                 continue
 
             with accelerator.accumulate(unet):
-                img = batch['img'].data[0]
-                len_queue = img.size(1)
-                num_key = len_queue - 1        # number of key frames (2 for queue_length=3)
-                imgs = img[:, 1:, ...]         # last num_key key frames
-                # img_metas: list[list[dict]] — img_metas[t] = list of B dicts for keyframe t
-                raw_metas = batch['img_metas'].data[0]  # list of B, each list of queue_length dicts
-                img_metas = []
-                for i in range(len_queue - num_key, len_queue):
-                    img_metas.append([sample[i] for sample in raw_metas])
-                dino_out = get_dino(imgs, img_metas)
-                # dino_cond = get_dino_cond(dino_out)
-
-                cond = get_condition(batch)
-
-                # Segmentation maps [B, V, H, W] — present only when use_semantics=True
-                seg_maps = torch.stack(batch['seg_maps'].data[0], dim=0)
-                seg_cond = get_segmaps_cond(seg_maps)
-
                 # Get BEV via DINOBevAligner (replaces BEVFormer encoder)
                 with torch.no_grad():
-                    latents = dino_aligner(dino_out, img_metas).detach()
+                    latents = bev_model(return_loss=False, only_bev=True, **batch).detach()
+                    # latents = dino_aligner(dino_out, img_metas).detach()
+                latents = latents.reshape(-1, bev_cfg.bev_h_, bev_cfg.bev_w_, bev_cfg._dim_)
+                latents = latents.permute(0, 3, 1, 2).contiguous()
                 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
@@ -420,8 +377,26 @@ def train():
                 # add noise to latents
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 
-                # Get the target for loss depending on the prediction type
+                # cond = get_condition(batch)
+                
+                imgs = batch['img'].data[0]
+                len_queue = imgs.size(1)
+                img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
+                
+                # DINOv2 condition
+                dino_out = get_dino(imgs, img_metas)
+                dino_cond = get_dino_cond(dino_out)
+                
+                # Segmentation maps [B, V, H, W]
+                seg_maps = torch.stack(batch['seg_maps'].data[0], dim=0)
+                seg_cond = get_segmaps_cond(seg_maps)
 
+                # DA3 depth maps [B, V, dH, dW] for FB-BEV depth consistency (optional)
+                depth_maps = None
+                if 'depth_maps' in batch.keys():
+                    depth_maps = torch.stack(batch['depth_maps'].data[0], dim=0).to(latents.device)
+
+                # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 elif noise_scheduler.config.prediction_type == "sample":
@@ -432,8 +407,8 @@ def train():
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 # Predict the noise residual and compute loss
-                # model_pred = unet(noisy_latents, timesteps, img_metas, dino_cond, seg_cond)
-                model_pred = unet(noisy_latents, timesteps, img_metas[-1], seg_cond, **cond)
+                model_pred = unet(noisy_latents, timesteps, img_metas, dino_cond, seg_cond, depth_maps=depth_maps)
+                # model_pred = unet(noisy_latents, timesteps, img_metas[-1], seg_cond, **cond)
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -489,7 +464,7 @@ def train():
                 train_loss = 0.0
 
                 # save checkpoint 
-                if global_step % args.checkpointing_steps == 0:
+                if global_step % args.checkpointing_steps == 0 and global_step > 10000:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                     if accelerator.is_main_process:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
@@ -517,14 +492,14 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step % args.checkpointing_steps == 0:
+                    if global_step % args.checkpointing_steps == 0 and global_step > 40000:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')
                             eval_results = evaluate(unet=unet.module,
                                                     bev_model=bev_model,
                                                     get_dino=get_dino,
-                                                    dino_aligner=dino_aligner,
+                                                    # dino_aligner=dino_aligner,
                                                     noise_scheduler=DDIM_scheduler,
                                                     dataset=val_dataset,
                                                     dataloader=val_dataloader,

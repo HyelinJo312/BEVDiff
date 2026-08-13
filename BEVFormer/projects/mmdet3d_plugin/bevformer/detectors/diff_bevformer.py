@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from collections import OrderedDict
@@ -18,8 +19,29 @@ from projects.mmdet3d_plugin.models.utils.bricks import run_time
 
 
 @DETECTORS.register_module()
-class DiffBEVFormer(BEVFormer): 
-    
+class DiffBEVFormer(BEVFormer):
+
+    def __init__(self, *args,
+                 use_mgd=False,
+                 mgd_alpha=0.00002,
+                 mgd_lambda=0.65,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_mgd = use_mgd
+        self.mgd_alpha = mgd_alpha
+        self.mgd_lambda = mgd_lambda
+
+        if use_mgd:
+            embed_dim = self.pts_bbox_head.embed_dims
+            # Lightweight align: 1x1 conv for channel remapping (student -> teacher)
+            # self.mgd_align = nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True)
+            self.mgd_align = None
+            self.mgd_generation = nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+            )
+
     def train_step(self, data, optimizer, model_target=None, bev_diffuser=None, progress=None):
         """The iteration step during training.
 
@@ -102,7 +124,7 @@ class DiffBEVFormer(BEVFormer):
         """
         bev_target = None
         if bev_diffuser:
-            assert model_target is not None 
+            assert model_target is not None
             bev_target = model_target(return_loss=False, only_bev=True, img=img, img_metas=img_metas).detach()
             
         len_queue = img.size(1)
@@ -195,13 +217,29 @@ class DiffBEVFormer(BEVFormer):
                     cond['default_obj_names'] = torch.stack(kwargs['default_obj_names'])           
                 return cond
 
+            B = bev.shape[0]
+            C = bev.shape[-1]
+            H, W = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
+
             bev_ = bev_target.detach() # deno
-            bev_ = bev_.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-            bev_ = bev_diffuser(bev_, get_condition(), grad_fn=get_classifier_gradient)   # 현재 grad_fn 사용 안함 (use_classifier_guidence=False)
-            bev_ = bev_.permute(0, 2, 3, 1).reshape(-1, self.pts_bbox_head.bev_h*self.pts_bbox_head.bev_w, bev.shape[-1])    # denoised feature
-            loss_bev = F.mse_loss(bev.float(), bev_.detach().float(), reduction="mean")
-            
-            losses['loss_bev'] = loss_bev*100
+            bev_ = bev_.reshape(-1, H, W, C).permute(0, 3, 1, 2)
+            teacher_bev = bev_diffuser(bev_, get_condition(), grad_fn=get_classifier_gradient)   # 현재 grad_fn 사용 안함 (use_classifier_guidence=False), (B, C, H, W)
+
+            if self.use_mgd:
+                student_bev = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()  # (B, C, H, W)
+                if self.mgd_align is not None:
+                    preds_S = self.mgd_align(student_bev)
+                else:
+                    preds_S = student_bev
+                mat = torch.rand((B, 1, H, W), device=preds_S.device)
+                mat = torch.where(mat > 1 - self.mgd_lambda, torch.zeros_like(mat), torch.ones_like(mat))
+                new_bev = self.mgd_generation(torch.mul(preds_S, mat))
+                loss_bev = F.mse_loss(new_bev, teacher_bev.detach().float(), reduction="mean")
+                losses['loss_bev'] = loss_bev * self.mgd_alpha
+            else:
+                bev_ = teacher_bev.permute(0, 2, 3, 1).reshape(-1, H * W, C)    # denoised feature
+                loss_bev = F.mse_loss(bev.float(), bev_.detach().float(), reduction="mean")
+                losses['loss_bev'] = loss_bev*100
     
         return losses
     

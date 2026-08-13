@@ -155,7 +155,7 @@ def train():
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
-        for i, model in enumerate(models):
+        for model in models:
             model.save_pretrained(os.path.join(output_dir, "unet"))
 
             # make sure to pop weight so that corresponding model is not saved again
@@ -203,8 +203,6 @@ def train():
                                           'use_3d_bbox': bev_cfg.use_3d_bbox,
                                           'num_classes': bev_cfg.num_classes,
                                           'num_bboxes': bev_cfg.num_bboxes,
-                                          'use_layout': bev_cfg.use_layout,
-                                          'use_semantics': bev_cfg.use_semantics,
                                       })
         
         bev_cfg.data.test.load_annos = True
@@ -214,8 +212,6 @@ def train():
                                         'use_3d_bbox': bev_cfg.use_3d_bbox,
                                         'num_classes': bev_cfg.num_classes,
                                         'num_bboxes': bev_cfg.num_bboxes,
-                                        'use_layout': bev_cfg.use_layout,
-                                        'use_semantics': bev_cfg.use_semantics,
                                     })
         
       
@@ -357,7 +353,7 @@ def train():
         step_cnt = global_step * args.gradient_accumulation_steps
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=140)
+    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=100)
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -402,7 +398,9 @@ def train():
                 imgs = batch['img'].data[0]
                 len_queue = imgs.size(1)
                 img_metas = [each[len_queue-1] for each in batch['img_metas'].data[0]]
-
+                depth_maps = None
+                if 'depth_maps' in batch.keys():
+                    depth_maps = torch.stack(batch['depth_maps'].data[0], dim=0)
                 cond = get_condition(batch)
 
                 # Segmentation maps [B, V, H, W] — present only when use_semantics=True
@@ -410,7 +408,7 @@ def train():
                 seg_cond = get_segmaps_cond(seg_maps)
 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_latents, timesteps, img_metas, seg_cond, **cond)
+                model_pred = unet(noisy_latents, timesteps, img_metas, seg_cond, depth_maps=depth_maps, **cond)[0]
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -494,7 +492,7 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step % args.checkpointing_steps == 0 and global_step > 10000:
+                    if global_step % args.checkpointing_steps == 0 and global_step > 40000:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')
@@ -521,7 +519,7 @@ def train():
                                 tb_writer.add_scalar(f"val/{metric}", score, global_step=step_cnt)
                     unet.train()                         
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "epoch":epoch}
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "epoch":epoch}
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:

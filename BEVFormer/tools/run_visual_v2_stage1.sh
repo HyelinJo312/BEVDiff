@@ -29,31 +29,32 @@ PORT_BASE=${PORT_BASE:-29506}
 SKIP_TEST=${SKIP_TEST:-1}
 
 # ---------- model paths ----------
-OURS_DIR="../results/version2/stage2/DiffBEVFormer_tiny_seg_v5"
-OURS_CONFIG="./projects/configs/diff_bevformer/layout_tiny_seg_v4_adapter.py"
+OURS_DIR="../results/version2/stage1/BEVDiffuser_base_seg_one-hot_v11"
+OURS_CONFIG="./projects/configs/bevdiffuser/layout_base_seg_v4.py"
 OURS_CKPT="${OURS_DIR}/epoch_24.pth"
 
-BASE_DIR="../results/version2/stage2/DiffBEVFormer_tiny_original_24epoch"
-BASE_CONFIG="./projects/configs/diff_bevformer/layout_tiny.py"
+BASE_DIR="../results/BEVDiffuser_BEVFormer_base_original_bs2"
+BASE_CONFIG="./projects/configs/bevdiffuser/layout_base.py"
 BASE_CKPT="${BASE_DIR}/epoch_24.pth"
 
 # ---------- JSON paths ----------
-OURS_JSON="./test/layout_tiny_seg_v4/BEVDiffuser_tiny_seg_one-hot_v11/checkpoint-50000/1001_1001_50/pts_bbox/results_nusc.json"
-BASE_JSON="./test/layout_tiny/BEVDiffuser_BEVFormer_tiny_original_bs2/checkpoint-50000/1001_1001_50/pts_bbox/results_nusc.json"
+OURS_JSON="../results/version2/stage1/BEVDiffuser_base_seg_one-hot_v11/checkpoint-50000/val/5_5_5/pts_bbox/results_nusc.json"
+BASE_JSON="../results/BEVDiffuser_BEVFormer_base_original_bs2/checkpoint-50000/val/5_5_5/pts_bbox/results_nusc.json"
 
 # When SKIP_TEST=0, force a re-run with a fixed jsonfile_prefix so we know the path.
 OURS_JSON_PREFIX="${OURS_DIR}/val/run_visual_v2"
 BASE_JSON_PREFIX="${BASE_DIR}/val/run_visual_v2"
 
-VIS_OUT_DIR=${VIS_OUT_DIR:-"../results/visualize_stage1/det_vis/BEV_generation"}
+VIS_OUT_DIR=${VIS_OUT_DIR:-"../results/visualize_stage1/det_vis/BEV_generation_base"}
 
 # ---------- visualization params ----------
 DATA_ROOT="./data/nuscenes"
 NUSC_VERSION="v1.0-trainval"
 START_IDX=0
 NUM_SAMPLES=20
-SCORE_THR=0.3
+SCORE_THR=0.4
 DPI=300
+GT_PKL="${DATA_ROOT}/nuscenes_infos_temporal_val.pkl"
 # Optional scene_token whitelist. If non-empty, ONLY samples that belong to
 # these scenes are visualized and SCENE_KEYWORDS is ignored.
 # e.g. SCENE_TOKENS=("fcbccedd61424f1b85dcbf8f897f9754")
@@ -62,8 +63,9 @@ SCENE_TOKENS=()
 # Leave empty to disable. SCENE_MATCH ∈ {any, all}.
 # Ignored when SCENE_TOKENS is non-empty.
 # SCENE_KEYWORDS=("rain" "night")
-SCENE_KEYWORDS=("rain")
+SCENE_KEYWORDS=()
 SCENE_MATCH="any"
+SCENE_LOCATION=()
 
 mkdir -p "${VIS_OUT_DIR}"
 

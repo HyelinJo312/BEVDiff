@@ -430,6 +430,14 @@ def parse_args():
     p.add_argument('--scene_match', choices=['any', 'all'], default='any',
                    help='Whether the scene description must contain ANY (default) '
                         'or ALL of --scene_keywords.')
+    p.add_argument('--scene_location', nargs='*', default=None,
+                   help='Filter samples by recording region, matched against the '
+                        'nuScenes log "location" field (boston-seaport, '
+                        'singapore-onenorth, singapore-queenstown, '
+                        'singapore-hollandvillage). Case-insensitive substring, '
+                        'so "boston" keeps all Boston scenes. Applied together '
+                        'with --scene_keywords (AND). Ignored if --scene_tokens '
+                        'is provided.')
     p.add_argument('--list_scenes', action='store_true',
                    help='Print matched (scene_token, sample_token, description) and exit.')
     p.add_argument('--gt_pkl', default=None,
@@ -462,6 +470,31 @@ def _filter_by_scene(nusc, tokens, keywords, match='any'):
         else:
             ok = any(k in desc for k in kws)
         if ok:
+            kept.append(tok)
+    return kept
+
+
+def _filter_by_location(nusc, tokens, locations):
+    """Keep only sample tokens recorded in one of the given map locations.
+
+    nuScenes stores the recording region in the `log` table `location` field,
+    e.g. 'boston-seaport', 'singapore-onenorth', 'singapore-queenstown',
+    'singapore-hollandvillage'. Matching is a case-insensitive substring, so
+    passing 'boston' selects all Boston scenes.
+    """
+    if not locations:
+        return tokens
+    locs = [l.lower() for l in locations]
+    kept = []
+    for tok in tokens:
+        try:
+            sample = nusc.get('sample', tok)
+            scene = nusc.get('scene', sample['scene_token'])
+            log = nusc.get('log', scene['log_token'])
+        except Exception:
+            continue
+        loc = (log.get('location') or '').lower()
+        if any(l in loc for l in locs):
             kept.append(tok)
     return kept
 
@@ -522,14 +555,23 @@ def main():
               f"{len(candidates)}/{before} samples")
         if not candidates:
             raise RuntimeError("No samples belong to the requested scene_tokens.")
-    elif args.scene_keywords:
-        before = len(candidates)
-        candidates = _filter_by_scene(
-            nusc, candidates, args.scene_keywords, match=args.scene_match)
-        print(f"scene filter [{args.scene_match}]: "
-              f"{args.scene_keywords} -> {len(candidates)}/{before} samples")
-        if not candidates:
-            raise RuntimeError("No samples match the requested scene keywords.")
+    else:
+        if args.scene_keywords:
+            before = len(candidates)
+            candidates = _filter_by_scene(
+                nusc, candidates, args.scene_keywords, match=args.scene_match)
+            print(f"scene filter [{args.scene_match}]: "
+                  f"{args.scene_keywords} -> {len(candidates)}/{before} samples")
+            if not candidates:
+                raise RuntimeError("No samples match the requested scene keywords.")
+        if args.scene_location:
+            before = len(candidates)
+            candidates = _filter_by_location(
+                nusc, candidates, args.scene_location)
+            print(f"location filter: {args.scene_location} -> "
+                  f"{len(candidates)}/{before} samples")
+            if not candidates:
+                raise RuntimeError("No samples match the requested locations.")
 
     if args.list_scenes:
         for t in candidates:

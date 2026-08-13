@@ -55,12 +55,12 @@ use_semantics = True
 
 unet = dict(
     # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
-    type='layout_diffusion.layout_seg_diffusion_unet_v3.LayoutDiffusionUNetModel',
+    type='layout_diffusion.layout_seg_diffusion_unet_v4.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
         use_scale_shift_norm=True,
-        return_multiscale=False,
+        # return_multiscale=False,
         in_channels=_dim_,
         out_channels=_dim_,
         seg_channels=[256, 512, 1024],
@@ -81,17 +81,29 @@ unet = dict(
         use_checkpoint=False,
         use_positional_embedding_for_attention=True,
         attention_block_type='ObjectAwareCrossAttention',
+        # seg_bev_aligner=dict(
+        #     bev_h=bev_h_,
+        #     bev_w=bev_w_,
+        #     cam_view=6,
+        #     pc_range=point_cloud_range,
+        #     num_points_in_pillar=4,
+        #     num_classes=16,
+        #     embed_dim=64,
+        #     emb_channels=256,
+        #     channel_mult=[1, 2, 4],
+        #     final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
+        # ),
         seg_bev_aligner=dict(
             bev_h=bev_h_,
             bev_w=bev_w_,
-            cam_view=6,
             pc_range=point_cloud_range,
-            num_points_in_pillar=4,
+            num_points_in_pillar=6,  # num_poitns: 4 -> 6
             num_classes=16,
-            embed_dim=64,
+            # embed_dim=64, # 256
             emb_channels=256,
             channel_mult=[1, 2, 4],
             final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
+            v_min_frac=0,
         ),
         layout_encoder=dict(
             type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
@@ -237,8 +249,8 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-# data_root = '../../data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+data_root = '../../data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 

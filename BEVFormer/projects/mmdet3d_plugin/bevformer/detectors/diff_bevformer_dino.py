@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from collections import OrderedDict
@@ -14,18 +15,55 @@ import numpy as np
 import mmdet3d
 from .bevformer import BEVFormer
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
-from projects.bevdiffuser.fm_feature import GetDINOV2Feat
+# from projects.bevdiffuser.fm_feature import GetDINOV2Feat
+
+
+class BEVDistillProjector(nn.Module):
+    def __init__(self, in_ch=256, hidden_ch=256, out_ch=256, groups=32):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_ch, hidden_ch, kernel_size=1, bias=False),
+            nn.GroupNorm(groups, hidden_ch),
+            nn.GELU(),
+            nn.Conv2d(hidden_ch, out_ch, kernel_size=1, bias=True),
+        )
+
+    def forward(self, x):
+        return self.proj(x)
+
 
 @DETECTORS.register_module()
 class DiffBEVFormerDINO(BEVFormer): 
     def __init__(self,
+                 use_proj=False,
+                 use_mgd=False,
+                 mgd_alpha=0.00002,
+                 mgd_lambda=0.65,
                  *args,
                  **kwargs):
-        
         super().__init__(*args, **kwargs)
+        
+        self.use_proj = use_proj
+        self.use_mgd = use_mgd
+        self.mgd_alpha = mgd_alpha
+        self.mgd_lambda = mgd_lambda
+        embed_dim = self.pts_bbox_head.embed_dims
 
-        self.get_dino = GetDINOV2Feat()
+        # self.get_dino = GetDINOV2Feat()
     
+        if use_proj:
+            self.bev_distill_proj = BEVDistillProjector(embed_dim, embed_dim, embed_dim)
+
+        if use_mgd:
+            self.mgd_align = None
+            self.mgd_generation = nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+            )
+        else:
+            print("No MGD module is used. Only use naive BEV distillation loss.(MSE)")
+
     def train_step(self, data, optimizer, model_target=None, bev_diffuser=None, progress=None):
         """The iteration step during training.
 
@@ -126,7 +164,7 @@ class DiffBEVFormerDINO(BEVFormer):
         
         losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d,
                                             gt_labels_3d, img_metas,
-                                            gt_bboxes_ignore, prev_bev, given_bev, model_target, bev_diffuser, bev_target, img)
+                                            gt_bboxes_ignore, prev_bev, given_bev, model_target, bev_diffuser, bev_target, img, **kwargs)
 
         losses.update(losses_pts)
         return losses
@@ -188,17 +226,46 @@ class DiffBEVFormerDINO(BEVFormer):
                 gradient = gradient.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
                 return gradient
             
-
-            cond = self.get_dino(img, img_metas)
-
-            bev_ = bev_target.detach()   # pre-trained BEVFormer (use 2 BEV encoders)
-            # bev_ = bev.detach()        # use only one BEV encoder
-            bev_ = bev_.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-            bev_ = bev_diffuser(bev_, cond, grad_fn=None)   # 현재 grad_fn 사용 안함 (use_classifier_guidence=False)
-            bev_ = bev_.permute(0, 2, 3, 1).reshape(-1, self.pts_bbox_head.bev_h*self.pts_bbox_head.bev_w, bev.shape[-1])    # denoised feature
-            loss_bev = F.mse_loss(bev.float(), bev_.detach().float(), reduction="mean")
+            # dino_feat = self.get_dino(img, img_metas)
+            segmaps = torch.stack(kwargs['seg_maps'], dim=0)
             
-            losses['loss_bev'] = loss_bev*100
+            depth_maps = None
+            if 'depth_maps' in kwargs.keys():
+                depth_maps = torch.stack(kwargs['depth_maps'], dim=0)
+                
+            bev_ = bev_target.detach()   # pre-trained BEVFormer (use 2 BEV encoders)
+            bev_ = bev_.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
+            teacher_bev = bev_diffuser(bev_, img, img_metas, segmaps, depth_maps, grad_fn=get_classifier_gradient)
+            
+            B = bev.shape[0]
+            C = bev.shape[-1]
+            H, W = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
+            # student_bev = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()  # (B, C, H, W)
+
+            if self.use_mgd:
+                student_bev = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()  # (B, C, H, W)
+                if self.mgd_align is not None:
+                    preds_S = self.mgd_align(student_bev) 
+                else:
+                    preds_S = student_bev
+                mat = torch.rand((B, 1, H, W), device=preds_S.device)
+                mat = torch.where(mat > 1 - self.mgd_lambda, torch.zeros_like(mat), torch.ones_like(mat))
+                new_bev = self.mgd_generation(torch.mul(preds_S, mat))
+                loss_bev = F.mse_loss(new_bev, teacher_bev.detach().float(), reduction='mean')
+                losses['loss_bev'] = loss_bev * self.mgd_alpha
+
+            elif self.use_proj:
+                student_bev = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()  # (B, C, H, W)
+                projected_bev = self.bev_distill_proj(student_bev.float())
+                student_bev_flat = projected_bev.permute(0, 2, 3, 1).reshape(B, H * W, C)
+                teacher_bev_flat = teacher_bev.permute(0, 2, 3, 1).reshape(B, H * W, C)
+                loss_bev = F.mse_loss(student_bev_flat, teacher_bev_flat.detach().float(), reduction="mean")
+                losses['loss_bev'] = loss_bev * 100
+            
+            else:
+                teacher_bev = teacher_bev.permute(0, 2, 3, 1).reshape(B, H * W, C)    
+                loss_bev = F.mse_loss(bev.float(), teacher_bev.detach().float(), reduction="mean")
+                losses['loss_bev'] = loss_bev * 100
     
         return losses
     

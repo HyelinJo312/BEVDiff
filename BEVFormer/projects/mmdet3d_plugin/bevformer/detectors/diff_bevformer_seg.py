@@ -8,7 +8,7 @@ import torch.distributed as dist
 from collections import OrderedDict
 from mmcv.runner import force_fp32, auto_fp16
 from mmdet.models import DETECTORS
-from mmdet3d.core import bbox3d2result
+from mmdet3d.core import bbox3d2result, draw_heatmap_gaussian, gaussian_radius
 import time
 import copy
 import numpy as np
@@ -18,49 +18,7 @@ from .bevformer import BEVFormer
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
 
 
-SEG_LABEL_DIC = {
-    'sedan': 1, 'highway': 2, 'bus': 3, 'truck': 4, 'terrain': 5,
-    'tree': 6, 'sidewalk': 7, 'bicycle': 8, 'bicyclist': 8,
-    'barrier': 9, 'barricade': 9, 'person': 10, 'pedestrian': 10,
-    'building': 11, 'bridge': 11, 'pole': 11, 'billboard': 11,
-    'light': 11, 'ashbin': 11, 'motorcycle': 12, 'motorcyclist': 12,
-    'crane': 13, 'trailer': 14, 'cone': 15, 'sky': 16,
-}
-
-CLASS_NAME_TO_SEG_ALIASES = {
-    'car': ['sedan'],
-    'truck': ['truck'],
-    'construction_vehicle': ['crane'],
-    'bus': ['bus'],
-    'trailer': ['trailer'],
-    'barrier': ['barrier', 'barricade'],
-    'motorcycle': ['motorcycle', 'motorcyclist'],
-    'bicycle': ['bicycle', 'bicyclist'],
-    'pedestrian': ['pedestrian', 'person'],
-    'traffic_cone': ['cone'],
-}
-
-DEFAULT_DET_CLASS_NAMES = [
-    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
-    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone',
-]
-
-
-def _resolve_fg_seg_labels(class_names):
-    fg = set()
-    for cn in class_names:
-        aliases = CLASS_NAME_TO_SEG_ALIASES.get(cn, [cn])
-        for a in aliases:
-            if a in SEG_LABEL_DIC:
-                fg.add(SEG_LABEL_DIC[a])
-    return sorted(fg)
-
-
 class BEVDistillProjector(nn.Module):
-    """
-    Student-side feature projector used only for distillation.
-    """
-
     def __init__(self, in_ch=256, hidden_ch=256, out_ch=256, groups=32):
         super().__init__()
         self.proj = nn.Sequential(
@@ -73,75 +31,34 @@ class BEVDistillProjector(nn.Module):
     def forward(self, x):
         return self.proj(x)
 
-
-class BEVDistillProjectorV2(nn.Module):
-    """
-    Stronger student-side projector with 3x3 spatial mixing and a residual path.
-    Higher capacity than the 1x1-only V1, intended to bridge a wider feature gap.
-    """
-
-    def __init__(self, in_ch=256, hidden_ch=256, out_ch=256, groups=32):
-        super().__init__()
-        assert in_ch == out_ch, "Residual path requires in_ch == out_ch"
-        self.conv1 = nn.Conv2d(in_ch, hidden_ch, kernel_size=3, padding=1, bias=False)
-        self.gn1 = nn.GroupNorm(groups, hidden_ch)
-        self.act1 = nn.GELU()
-        self.conv2 = nn.Conv2d(hidden_ch, hidden_ch, kernel_size=3, padding=1, bias=False)
-        self.gn2 = nn.GroupNorm(groups, hidden_ch)
-        self.act2 = nn.GELU()
-        self.conv3 = nn.Conv2d(hidden_ch, out_ch, kernel_size=1, bias=True)
-
-    def forward(self, x):
-        h = self.act1(self.gn1(self.conv1(x)))
-        h = self.act2(self.gn2(self.conv2(h)))
-        return x + self.conv3(h)
-
-
 @DETECTORS.register_module()
 class DiffBEVFormerSeg(BEVFormer):
 
     def __init__(self, *args,
                  use_proj=False,
-                 proj_version='v1',
-                 use_seg_mask=False,
-                 fg_weight_alpha=5.0,
-                 det_class_names=None,
                  use_aux_seg=False,
                  aux_seg_num_classes=16,
                  aux_seg_weight=1.0,
                  aux_seg_valid_threshold=0.1,
-                 use_bev_rel=False,
-                 bev_rel_weight=10.0,
+                 use_bbox_weight=False,
+                 bbox_weight_min_overlap=0.1,
+                 pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.use_proj = use_proj
-        self.proj_version = proj_version
-        self.use_seg_mask = use_seg_mask
-        self.fg_weight_alpha = fg_weight_alpha
         self.use_aux_seg = use_aux_seg
         self.aux_seg_num_classes = aux_seg_num_classes
         self.aux_seg_weight = aux_seg_weight
         self.aux_seg_valid_threshold = aux_seg_valid_threshold
-        self.use_bev_rel = use_bev_rel
-        self.bev_rel_weight = bev_rel_weight
+        self.use_bbox_weight = use_bbox_weight
+        self.bbox_weight_min_overlap = bbox_weight_min_overlap
+        self.pc_range = tuple(pc_range)
 
         embed_dim = self.pts_bbox_head.embed_dims
-        
+
         if use_proj:
-            if proj_version == 'v2':
-                self.bev_distill_proj = BEVDistillProjectorV2(embed_dim, embed_dim, embed_dim)
-            else:
-                self.bev_distill_proj = BEVDistillProjector(embed_dim, embed_dim, embed_dim)
-                
-        if use_seg_mask:
-            cls_names = det_class_names if det_class_names is not None else DEFAULT_DET_CLASS_NAMES
-            fg_labels = _resolve_fg_seg_labels(cls_names)
-            # NOTE: SegEmbedEncoder clamps labels to [0, 15], so raw label 16
-            assert max(fg_labels) <= 15, \
-                "FG labels must be in [0,15] due to SegEmbedEncoder.clamp(max=15)."
-            self.register_buffer(
-                '_fg_seg_idx', torch.tensor(fg_labels, dtype=torch.long), persistent=False,
-            )
+            self.bev_distill_proj = BEVDistillProjector(embed_dim, embed_dim, embed_dim)
+
         if use_aux_seg:
             # Lightweight head: 3x3 Conv-GN-GELU + 1x1 Conv → (num_cls+1) channels.
             self.aux_seg_head = nn.Sequential(
@@ -150,6 +67,46 @@ class DiffBEVFormerSeg(BEVFormer):
                 nn.GELU(),
                 nn.Conv2d(embed_dim, aux_seg_num_classes + 1, kernel_size=1, bias=True),
             )
+
+    def _compute_fg_heatmap(self, gt_bboxes_3d, bev_h, bev_w, device):
+        """
+        Returns:
+            fg_map: (B, bev_h, bev_w) heatmap with peak=1 at object centers,
+                    0 in background.
+        """
+        B = len(gt_bboxes_3d)
+        fg_map = torch.zeros((B, bev_h, bev_w), device=device, dtype=torch.float32)
+
+        pc_x_min, pc_y_min = self.pc_range[0], self.pc_range[1]
+        voxel_x = (self.pc_range[3] - self.pc_range[0]) / bev_w
+        voxel_y = (self.pc_range[4] - self.pc_range[1]) / bev_h
+
+        for b, gt_bboxes in enumerate(gt_bboxes_3d):
+            if len(gt_bboxes) == 0:
+                continue
+            centers = gt_bboxes.gravity_center.to(device)   # (N, 3)
+            sizes = gt_bboxes.tensor[:, 3:6].to(device)     # (N, 3) = (w, l, h)
+
+            for k in range(len(gt_bboxes)):
+                # Keep as Tensor scalars — mmdet3d's gaussian_radius uses torch.sqrt
+                # which requires Tensor inputs (Python float raises TypeError).
+                w_cells = sizes[k, 0] / voxel_x
+                l_cells = sizes[k, 1] / voxel_y
+                if w_cells.item() <= 0 or l_cells.item() <= 0:
+                    continue
+
+                radius = gaussian_radius(
+                    (l_cells, w_cells), min_overlap=self.bbox_weight_min_overlap
+                )
+                radius = max(1, int(radius))
+
+                cx_int = int(((centers[k, 0] - pc_x_min) / voxel_x).item())
+                cy_int = int(((centers[k, 1] - pc_y_min) / voxel_y).item())
+
+                if 0 <= cx_int < bev_w and 0 <= cy_int < bev_h:
+                    draw_heatmap_gaussian(fg_map[b], (cx_int, cy_int), radius)
+
+        return fg_map   # (B, bev_h, bev_w), in [0, 1]
 
     def train_step(self, data, optimizer, model_target=None, bev_diffuser=None, progress=None):
         """The iteration step during training.
@@ -334,70 +291,40 @@ class DiffBEVFormerSeg(BEVFormer):
                 
             bev_ = bev_target.detach() # deno
             bev_ = bev_.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-            bev_, seg_bev_prob = bev_diffuser(bev_, img_metas, get_condition(), segmaps, depth_maps, grad_fn=get_classifier_gradient)
-            seg_bev_prob = seg_bev_prob.detach().float()
-
+            # bev_, seg_bev_prob = bev_diffuser(bev_, img_metas, get_condition(), segmaps, depth_maps, grad_fn=get_classifier_gradient)
+            # seg_bev_prob = seg_bev_prob.detach().float()
+            bev_ = bev_diffuser(bev_, img_metas, get_condition(), segmaps, depth_maps, grad_fn=get_classifier_gradient)
+            
             B, C = bev.shape[0], bev.shape[-1]
             H, W = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
             bev_ = bev_.permute(0, 2, 3, 1).reshape(B, H * W, C)
-
-            # Student-side projector (optional). Conv requires (B, C, H, W); reshape around it.
+            
             if self.use_proj:
-                bev_s = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous().float()
-                bev_s = self.bev_distill_proj(bev_s)
-                bev_s = bev_s.permute(0, 2, 3, 1).reshape(B, H * W, C)
-            else:
-                bev_s = bev.float()
+                bev_s_2d = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous().float()
+                bev_s_2d = self.bev_distill_proj(bev_s_2d)
+                bev = bev_s_2d.permute(0, 2, 3, 1).reshape(B, H * W, C)
 
-            if self.use_seg_mask:
-                # FG-weighted MSE: emphasize detection foreground cells 
-                det_prob = seg_bev_prob.index_select(1, self._fg_seg_idx).sum(dim=1).clamp(0.0, 1.0)  # (B, H, W)
-                weight = (1.0 + self.fg_weight_alpha * det_prob).reshape(B, H * W)                    # (B, H*W)
-                mse_loss = ((bev_s - bev_.detach().float()) ** 2).mean(dim=-1)                        # (B, H*W)
+            if self.use_bbox_weight:
+                fg_heatmap = self._compute_fg_heatmap(gt_bboxes_3d, H, W, bev.device)   # (B, H, W)
+                weight = fg_heatmap.reshape(B, H * W)                                   # (B, H*W)
+                mse_loss = F.mse_loss(bev, bev_.detach().float(), reduction="none").mean(dim=-1)           # (B, H*W)
                 loss_bev = (mse_loss * weight).sum() / weight.sum().clamp_min(1e-6)
             else:
-                loss_bev = F.mse_loss(bev_s, bev_.detach().float(), reduction="mean")
+                loss_bev = F.mse_loss(bev.float(), bev_.detach().float(), reduction="mean")
 
             losses['loss_bev'] = loss_bev * 100
 
-            # Relational / structural distillation: match per-cell self-similarity structure.
-            if self.use_bev_rel:
-                bev_s_raw_2d = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()
-                bev_t_raw_2d = bev_.detach().reshape(B, H, W, C).permute(0, 3, 1, 2).contiguous()
-
-                sim_s = self._sim_matrix(bev_s_raw_2d.float())
-                sim_t = self._sim_matrix(bev_t_raw_2d.float())
-                loss_bev_rel = F.mse_loss(sim_s, sim_t.detach())
-                losses['loss_bev_rel'] = loss_bev_rel * self.bev_rel_weight
-
-            # Auxiliary seg supervision
-            if self.use_aux_seg:
-                B = bev.shape[0]
-                C = bev.shape[-1]
-                H, W = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
-                bev_s_raw_2d = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()
-                seg_logits = self.aux_seg_head(bev_s_raw_2d.float())  # (B, num_cls+1, H, W)
-
-                valid = (seg_bev_prob.sum(dim=1) > self.aux_seg_valid_threshold).float()  # (B, H, W)
-                log_pred = F.log_softmax(seg_logits, dim=1)
-                kl_per_pixel = F.kl_div(log_pred, seg_bev_prob, reduction='none').sum(dim=1)  # (B, H, W)
-                loss_aux_seg = (kl_per_pixel * valid).sum() / valid.sum().clamp_min(1.0)
-                losses['loss_bev_aux_seg'] = loss_aux_seg * self.aux_seg_weight
+            # # Auxiliary seg supervision
+            # if self.use_aux_seg:
+            #     seg_logits = self.aux_seg_head(bev_s_2d)  # (B, num_cls+1, H, W)
+            #     # valid = (seg_bev_prob.sum(dim=1) > self.aux_seg_valid_threshold).float()  # (B, H, W)
+            #     valid = (seg_bev_prob[:, 1:, :, :].sum(dim=1) > self.aux_seg_valid_threshold).float() # w/o BG-dominated cells
+            #     log_pred = F.log_softmax(seg_logits, dim=1)
+            #     kl_per_pixel = F.kl_div(log_pred, seg_bev_prob, reduction='none').sum(dim=1)  # (B, H, W)
+            #     loss_aux_seg = (kl_per_pixel * valid).sum() / valid.sum().clamp_min(1.0)
+            #     losses['loss_bev_aux_seg'] = loss_aux_seg * self.aux_seg_weight
 
         return losses
-
-    @staticmethod
-    def _sim_matrix(x):
-        """Per-cell cosine self-similarity matrix.
-
-        Args:
-            x: (B, C, H, W) feature map.
-        Returns:
-            S: (B, H*W, H*W) cosine self-similarity matrix.
-        """
-        x = x.flatten(2)                  # (B, C, H*W)
-        x = F.normalize(x, dim=1)         # L2-normalize along channel
-        return x.transpose(1, 2) @ x      # (B, H*W, H*W)
 
     def _parse_losses_mix(self, losses, weight=0.5):
         """Parse the raw outputs (losses) of the network.
@@ -443,7 +370,16 @@ class DiffBEVFormerSeg(BEVFormer):
     
     
     
-    
+class MGDAlign(nn.Module):
+    def __init__(self, dim, groups=32):
+        super().__init__()
+        self.gn = nn.GroupNorm(groups, dim, affine=False)
+        self.dw_affine = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=True)
+        # nn.init.dirac_(self.dw_affine.weight)  # identity at init (center=1, else=0)
+        # nn.init.zeros_(self.dw_affine.bias)
+
+    def forward(self, x):
+        return self.dw_affine(self.gn(x))
     
     
 @DETECTORS.register_module()
@@ -453,20 +389,45 @@ class DiffBEVFormerSegV2(BEVFormer):
                  use_aux_seg=False,
                  aux_seg_num_classes=16,
                  aux_seg_weight=0.5,
+                 use_proj=False,
+                 use_mgd=False,
+                 mgd_alpha=0.00002,
+                 mgd_lambda=0.65,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.use_aux_seg = use_aux_seg
         self.aux_seg_num_classes = aux_seg_num_classes
         self.aux_seg_weight = aux_seg_weight
+        self.use_proj = use_proj
+        self.use_mgd = use_mgd
+        self.mgd_alpha = mgd_alpha
+        self.mgd_lambda = mgd_lambda
+        embed_dim = self.pts_bbox_head.embed_dims
+
         if use_aux_seg:
-            embed_dim = self.pts_bbox_head.embed_dims
             # Lightweight head: 3x3 Conv-GN-GELU + 1x1 Conv → (num_cls+1) channels.
-            # Predicts BEV-space class probability for KL alignment with seg_aligner.compute_prob_only().
             self.aux_seg_head = nn.Sequential(
                 nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1, bias=False),
                 nn.GroupNorm(32, embed_dim),
                 nn.GELU(),
                 nn.Conv2d(embed_dim, aux_seg_num_classes + 1, kernel_size=1, bias=True),
+            )
+
+        if use_proj:
+            self.bev_distill_proj = BEVDistillProjector(embed_dim, embed_dim, embed_dim)
+
+        if use_mgd:
+            # Lightweight align: 1x1 conv for channel remapping (student -> teacher
+            # self.mgd_align = nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True)
+            self.mgd_align = None
+            self.mgd_generation = nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+                # nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1, bias=False),
+                # nn.GroupNorm(32, embed_dim),
+                # nn.GELU(),
+                # nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1, bias=True),
             )
 
     def train_step(self, data, optimizer, model_target=None, bev_diffuser=None, progress=None):
@@ -650,30 +611,34 @@ class DiffBEVFormerSegV2(BEVFormer):
             if 'depth_maps' in kwargs.keys():
                 depth_maps = torch.stack(kwargs['depth_maps'], dim=0)
 
-            bev_ = bev_target.detach() # deno
-            bev_ = bev_.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-            bev_ = bev_diffuser(bev_, img_metas, get_condition(), segmaps, depth_maps, grad_fn=get_classifier_gradient)
-            bev_flat = bev_.permute(0, 2, 3, 1).reshape(-1, self.pts_bbox_head.bev_h*self.pts_bbox_head.bev_w, bev.shape[-1])
-            loss_bev = F.mse_loss(bev.float(), bev_flat.detach().float(), reduction="mean")
+            noisy_bev = bev_target.detach()
+            noisy_bev = noisy_bev.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
+            teacher_bev = bev_diffuser(noisy_bev, img_metas, get_condition(), segmaps, depth_maps, grad_fn=get_classifier_gradient)
+            # seg_bev_prob = seg_bev_prob.detach().float()  # (B, num_cls+1, H, W)
 
-            losses['loss_bev'] = loss_bev * 100
+            B = bev.shape[0]
+            C = bev.shape[-1]
+            H, W = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
+            # teacher_bev: (B, C, H, W) — keep 2D for MGD; flatten inline when needed
+            student_bev = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()  # (B, C, H, W)
 
-            # Auxiliary seg supervision: bridge information asymmetry by forcing
-            if self.use_aux_seg:
-                B = bev.shape[0]
-                C = bev.shape[-1]
-                H, W = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
-                bev_s_2d = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()
-                seg_logits = self.aux_seg_head(bev_s_2d.float())  # (B, num_cls+1, H, W)
+            if self.use_mgd:
+                if self.mgd_align is not None:
+                    preds_S = self.mgd_align(student_bev) 
+                else:
+                    preds_S = student_bev
+                mat = torch.rand((B, 1, H, W), device=preds_S.device)
+                mat = torch.where(mat > 1 - self.mgd_lambda, torch.zeros_like(mat), torch.ones_like(mat))
+                new_bev = self.mgd_generation(torch.mul(preds_S, mat))
+                loss_bev = F.mse_loss(new_bev, teacher_bev.detach().float(), reduction='mean')
+                losses['loss_bev'] = loss_bev * self.mgd_alpha
 
-                with torch.no_grad():
-                    seg_bev_prob_gt = bev_diffuser.unet.seg_aligner.compute_prob_only(
-                                                        segmaps, img_metas, depth_maps,
-                                                    ).detach().float()  # (B, num_cls+1, H, W)
-                log_pred = F.log_softmax(seg_logits, dim=1)
-                # Per-pixel KL(teacher || student) averaged over (B, H, W).
-                loss_aux_seg = F.kl_div(log_pred, seg_bev_prob_gt, reduction='none').sum(dim=1).mean()
-                losses['loss_bev_aux_seg'] = loss_aux_seg * self.aux_seg_weight
+            elif self.use_proj:
+                bev_s_2d = self.bev_distill_proj(student_bev.float())
+                bev_s_flat = bev_s_2d.permute(0, 2, 3, 1).reshape(B, H * W, C)
+                teacher_bev_flat = teacher_bev.permute(0, 2, 3, 1).reshape(B, H * W, C)
+                loss_bev = F.mse_loss(bev_s_flat, teacher_bev_flat.detach().float(), reduction="mean")
+                losses['loss_bev'] = loss_bev * 100
 
         return losses
     

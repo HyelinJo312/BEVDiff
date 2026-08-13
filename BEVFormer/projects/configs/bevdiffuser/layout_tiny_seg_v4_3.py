@@ -6,6 +6,15 @@
 # smaller input size: 1600*900 -> 800*450
 # multi-scale feautres -> single scale features (C5)
 
+'''
+[Ablation Study]
+
+Semantic BEV Prior with Input Concat
+
+(Without BFDN)
+
+'''
+
 
 _base_ = [
     '../datasets/custom_nus-3d.py',
@@ -48,51 +57,25 @@ bev_w_ = 50
 queue_length = 3 # each sequence contains `queue_length` frames.
 
 num_bboxes = 300
-num_classes = len(class_names) + 2
+num_classes = len(class_names) + 2 
 use_3d_bbox = True
-
-# unet = dict(
-#     # type='projects.bevdiffuser.ldm.modules.diffusionmodules.openaimodel.UNetModel',
-#     type='projects.bevdiffuser.layout_diffusion.diffusion_unet_v3.DiffusionUNetModel',
-#     parameters=dict(
-#         image_size=bev_h_,
-#         use_fp16=False,
-#         use_scale_shift_norm=True,
-#         in_channels=_dim_,
-#         out_channels=_dim_,
-#         model_channels=256,
-#         context_dim=256,
-#         dino_dim=768,
-#         # encoder_channels=256, # assert same as layout_encoder.hidden_dim
-#         num_head_channels=32,
-#         num_heads=-1,
-#         num_heads_upsample=-1,
-#         num_res_blocks=2,
-#         num_attention_blocks=1,
-#         resblock_updown=True,
-#         use_spatial_transformer=True,
-#         num_pre_downsample=0,
-#         attention_resolutions=[ 4, 2, 1 ],
-#         channel_mult=[ 1, 2, 4 ],
-#         dropout=0.0,
-#         use_checkpoint=False,
-#         # use_positional_embedding_for_attention=True,
-#         # attention_block_type='ObjectAwareCrossAttention',
-#         return_multiscale=False)
-# )
+use_layout = True
+use_semantics = True
+use_depth = False
 
 unet = dict(
     # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
-    type='layout_diffusion.diffusion_unet_v3.DiffusionUNetModel',
+    # A1 ablation: ControlNet-style input-concat seg injection
+    type='layout_diffusion.layout_seg_diffusion_unet_v4_3.LayoutDiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
         use_scale_shift_norm=True,
-        return_multiscale=True,
         in_channels=_dim_,
         out_channels=_dim_,
+        seg_channels=[256, 512, 1024],
         model_channels=256,
-        context_dim=256,  # 768 (original DINOv2)
+        # context_dim=256,  # 768 (original DINOv2)
         encoder_channels=256, # assert same as layout_encoder.hidden_dim
         num_head_channels=32,
         num_heads=-1,
@@ -100,16 +83,46 @@ unet = dict(
         num_res_blocks=2,
         num_attention_blocks=1,
         resblock_updown=True,
-        use_spatial_transformer=True,
+        use_spatial_transformer=False,
         num_pre_downsample=0,
         attention_ds=[ 4, 2, 1 ],
         channel_mult=[ 1, 2, 4 ],
         dropout=0.0,
         use_checkpoint=False,
-        use_positional_embedding_for_attention=True)
+        use_positional_embedding_for_attention=True,
+        attention_block_type='ObjectAwareCrossAttention',
+        seg_bev_aligner=dict(
+            bev_h=bev_h_,
+            bev_w=bev_w_,
+            pc_range=point_cloud_range,
+            num_points_in_pillar=6,  # num_poitns: 4 -> 6
+            num_classes=16,
+            # embed_dim=64, # 256
+            emb_channels=256,
+            channel_mult=[1, 2, 4],
+            final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
+            v_min_frac=0,
+        ),
+        layout_encoder=dict(
+            type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
+            parameters=dict(
+                used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
+                # used_condition_types=['obj_name', 'obj_bbox', 'is_valid_obj'],
+                layout_length=num_bboxes,
+                num_classes_for_layout_object=num_classes,
+                mask_size_for_layout_object=0,
+                hidden_dim=256,
+                output_dim=1024, # model_channels x 4
+                num_layers=6,
+                num_heads=8,
+                use_final_ln=True,
+                use_positional_embedding=False,
+                resolution_to_attention=[12, 25, 50], #[ 8, 16, 32 ],
+                use_key_padding_mask=False,
+                use_3d_bbox=use_3d_bbox),
+            ),
+        ),
 )
-
-
 
 model = dict(
     type='BEVFormer',
@@ -235,8 +248,9 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_layout'
-# data_root = '../../data/nuscenes/'
-data_root = 'BEVFormer/data/nuscenes/'
+# dataset_type = 'CustomNuScenesDiffusionDataset_layout_seg'
+data_root = '../../data/nuscenes/'
+# data_root = 'BEVFormer/data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 
@@ -280,6 +294,9 @@ data = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
+        use_layout=use_layout,
+        use_semantics=use_semantics,
+        semantic_path=data_root + 'nuscenes_semantic',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -293,11 +310,17 @@ data = dict(
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
+             use_layout=use_layout,
+             use_semantics=use_semantics,
+             semantic_path=data_root + 'nuscenes_semantic_val',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
+              use_layout=use_layout,
+              use_semantics=use_semantics,
+              semantic_path=data_root + 'nuscenes_semantic_val',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),

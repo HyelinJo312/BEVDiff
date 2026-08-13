@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-CONFIG="./projects/configs/diff_bevformer/layout_tiny_dino_gt.py"
-CHECKPOINT="../results/stage2/DiffBEVFormer_tiny_dino_gt_weighted-concat/epoch_24.pth"
+CONFIG="../results/version2/stage2/DiffBEVFormer_tiny_original_24epoch/layout_tiny.py"
+CHECKPOINT="../results/version2/stage2/DiffBEVFormer_tiny_original_24epoch/epoch_24.pth"
 GPUS=$3
 PORT=${PORT:-29503}
 

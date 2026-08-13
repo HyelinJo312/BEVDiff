@@ -141,8 +141,11 @@ train_task_decoder = True
 
 model = dict(
     type='DiffBEVFormerSeg',
-    use_shared_proj=True,
-    shared_proj_dim=128,    # 32/64/128 sweep 가능
+    use_proj=True,  # original raw MSE (use_proj=True → A+B: projector + GroupNorm)
+    use_aux_seg=True,                  # Phase 2: aux semantic supervision on Student backbone
+    aux_seg_num_classes=16,            # must match seg_aligner.num_classes (→ 17-channel softmax)
+    aux_seg_weight=1.0,                 # KL loss weight (effective ~0.5 after _parse_losses_mix)
+    aux_seg_valid_threshold=0,       # mask out FoV-occluded cells (degenerate GT prob)
     use_grid_mask=True,
     video_test_mode=True,
     pretrained=dict(img='torchvision://resnet50'),
@@ -365,7 +368,7 @@ optimizer = dict(
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.5),
-            # 'bev_distill_proj': dict(lr_mult=1.5, decay_mult=0.0), 
+            # 'bev_distill_proj': dict(lr_mult=2.0, decay_mult=0.0), 
         }),
     weight_decay=0.01)
 
