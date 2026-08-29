@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # GPU selection: using GPUs 4-7 (0-3 occupied by other jobs)
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 # ── CPU thread budget ────────────────────────────────────────────────────────
 export OMP_NUM_THREADS=1
@@ -20,22 +20,21 @@ export TCNN_CUDA_ARCHITECTURES=86 # Ampere (A6000)
 GPUS=4
 PORT=${PORT:-29506}
 
-BEV_CONFIG="../configs/bevdiffuser/bev_tiny_onlyseg_sam_v3.py"
+BEV_CONFIG="../configs/bevdiffuser/bev_tiny_onlyseg_sam_v2_da3.py"
 BEV_CHECKPOINT="../../ckpts/bevformer_tiny_epoch_24.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
 PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_tiny_onlyseg_sam3_v4
-# checkpoint settings
+RUN_NAME=BEVDiffuser_tiny_onlyseg_sam3_v5
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=3
 
 # allow 500 extra steps to be safe
 MAX_TRAINING_STEPS=50000
 TRAIN_BATCH_SIZE=2
-DATALOADER_NUM_WORKERS=4
+DATALOADER_NUM_WORKERS=6
 GRADIENT_ACCUMMULATION_STEPS=1
 
 # loss and lr settings
@@ -55,7 +54,8 @@ mkdir -p $OUTPUT_DIR
 # train!
 export PYTHONPATH="$(dirname $0)/../..":$PYTHONPATH
 # taskset -c 0-15,32-47 torchrun --nproc_per_node $GPUS \
-torchrun --nproc_per_node $GPUS \
+# torchrun --nproc_per_node $GPUS \
+taskset -c 16-31,48-63 torchrun --nproc_per_node $GPUS \
     --master_port=$PORT \
   "$(dirname "$0")/train_bev_diffuser_only_seg.py" \
     --bev_config $BEV_CONFIG \

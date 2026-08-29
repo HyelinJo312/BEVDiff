@@ -39,6 +39,62 @@ Stage 1에서는 downstream task head를 붙이지 않는다. 즉, detection hea
 - Semantic prior는 decoder의 BFDN/FDN path를 통해 spatially adaptive normalization 형태로 주입된다.
 - 따라서 semantic condition은 object token을 attention으로 참조하는 수준이 아니라, BEV feature의 spatial statistics 자체를 semantic-dependent하게 조절한다.
 
+### Semantic BEV Prior Construction Details
+
+`BEVFormer/projects/bevdiffuser/layout_diffusion/seg_bev_aligner_one_hot_v3.py`
+기준으로 semantic BEV prior는 다음 순서로 만들어진다.
+
+1. Dataset은 각 camera image에 대응하는 SAM3 semantic mask(`*_mask.bin`)를
+읽고, image pipeline과 동일하게 nearest-neighbor resize 및 padding을 적용한다.
+따라서 `seg_maps`는 padded image frame 기준의 multi-view semantic ID map
+`[V, H_pad, W_pad]`로 dataloader에 들어간다.
+2. Config의 `seg_id_remap={16:2, 17:2, 18:2, 19:16}`에 따라 SAM3 raw class
+id를 model taxonomy로 정리한다. 현재 설정에서는 crosswalk, lane, road arrow를
+road class로 합치고, sky는 별도 sky id로 둔다.
+3. `SegEmbedEncoder`는 batch semantic ID map `[B,V,H,W]`를 `[B*V,H,W]`로
+펼친 뒤, invalid label `-1`을 0으로 치환하고, configurable nearest downsampling을
+적용한다. 현재 config의 `seg_downsample_factor=2`는 기존 half-resolution setting을
+재현하며, `seg_downsample_factor=1`로 두면 full-resolution semantic one-hot을 사용할 수 있다.
+이후 `F.one_hot`으로 각 pixel의 semantic class id를 one-hot vector로 변환한다.
+현재 `num_classes=16`이므로 one-hot channel은 background/ignore를 포함해 `C=17`이다.
+4. `SegBEVAligner`는 BEVFormer-style 3D reference points를 BEV grid마다
+생성한다. 현재 BEV grid는 `50x50`이고, 각 BEV cell에 대해
+`num_points_in_pillar=4`개의 height sample을 사용한다. Config에서는
+`pillar_z_range=(-1.84,1.16)`을 사용해 semantic projection에 쓰는 z range를 제한한다.
+5. 각 3D BEV reference point를 `lidar2img` calibration으로 multi-view image
+plane에 투영한다. 투영된 image coordinate가 image boundary 안에 있고 positive
+depth를 갖는 경우에만 valid semantic observation으로 사용한다.
+6. 투영 위치에서 semantic one-hot map을 `grid_sample(..., mode='nearest')`로
+샘플링한다. 이 결과는 `[B,V,Q,D,C]` 형태의 semantic vote가 된다. 여기서
+`Q=bev_h*bev_w`, `D=num_points_in_pillar`, `C=semantic classes`이다.
+7. DA3 depth map이 있는 경우, depth consistency weight를 semantic vote에 곱한다.
+이 weight는 diffusion model에 직접 들어가는 별도 condition이 아니라,
+semantic-to-BEV projection 과정에서 각 semantic observation의 신뢰도를 조절하는
+voting weight이다.
+8. 구체적으로 projected BEV point의 camera-frame depth `d_proj`와 같은 image
+coordinate에서 sample한 DA3 depth `d_DA3`를 비교하고, Gaussian kernel
+`w_depth = exp(-(d_proj-d_DA3)^2/(2*sigma^2))`를 계산한다. 현재 config에서는
+`depth_consistency_mode='gaussian'`, `depth_consistency_sigma=4.0`이다.
+9. 최종 semantic vote는 projection validity mask와 depth consistency weight를
+곱한 뒤 pillar 방향과 camera-view 방향으로 합산된다. 즉 BEV cell `q`의 semantic
+histogram은 개념적으로 `H_q(c)=sum_v sum_d m_qvd w_qvd 1[s_qvd=c]`와 같이 계산된다.
+10. `sky_as_ignore=True`인 경우 sky channel의 count는 ignore/background channel로
+이동되고 sky channel은 0으로 지워진다. 이 처리는 sky가 BEV ground-plane semantic
+prior를 지배하지 않도록 하는 projection 후처리로 볼 수 있다.
+11. Semantic histogram은 class probability distribution으로 normalize되고,
+convolutional embedding(`prob_to_emb`)과 learnable BEV positional embedding을 거쳐
+256-channel semantic BEV feature가 된다.
+12. 마지막으로 `SegBEVEncoder`가 이 semantic BEV feature를 multi-scale prior
+`{1,2,4}`로 변환한다. 현재 `channel_mult=[1,1,1]`이므로 각 scale의 semantic prior
+channel은 모두 256으로 유지되어 UNet의 `seg_channels=[256,256,256]`과 맞춰진다.
+
+이 과정을 논문에서 설명할 때 중요한 점은, DA3 depth가 diffusion denoising의
+독립적인 condition이 아니라는 것이다. DA3 depth는 semantic mask를 BEV로 정렬할 때
+occlusion이나 projection mismatch가 의심되는 semantic observation을 약하게 만드는
+**depth-consistency weighted semantic voting**으로 사용된다. 최종적으로 diffusion
+UNet에 주입되는 것은 DA3 depth map 자체가 아니라, DA3 depth로 projection confidence가
+보정된 dense semantic BEV prior이다.
+
 ### Output
 
 Stage 1의 결과물은 semantic-only condition을 받은 denoised BEV feature를 생성할 수 있는 frozen diffusion teacher이다. 이 teacher는 Stage 2에서 downstream BEV model의 feature distillation target으로 사용된다. 따라서 Stage 1의 가치는 standalone detection score가 아니라, 여러 downstream BEV task에서의 transfer 성능으로 검증한다.
@@ -47,8 +103,12 @@ Stage 1의 결과물은 semantic-only condition을 받은 denoised BEV feature�
 
 - `BEVFormer/projects/configs/bevdiffuser/bev_tiny_onlyseg.py`
 - `BEVFormer/projects/configs/bevdiffuser/bev_tiny_onlyseg_sam_v3.py`
+- `BEVFormer/projects/configs/bevdiffuser/bev_tiny_onlyseg_sam_v2_da3.py`
 - `BEVFormer/projects/bevdiffuser/train_bev_diffuser_only_seg.py`
 - `BEVFormer/projects/bevdiffuser/layout_diffusion/seg_diffusion_unet.py`
+- `BEVFormer/projects/bevdiffuser/layout_diffusion/seg_diffusion_unet_v2.py`
+- `BEVFormer/projects/bevdiffuser/layout_diffusion/seg_bev_aligner_one_hot_v3.py`
+- `BEVFormer/projects/bevdiffuser/data_utils.py`
 
 ### How to Describe Stage 1 in the Paper
 

@@ -90,13 +90,11 @@ unet = dict(
             pc_range=point_cloud_range,
             num_points_in_pillar=4,
             num_classes=16,
-            # embed_dim=64, # 256
             emb_channels=256,
             channel_mult=[1, 1, 1],  # keep 256ch at every scale; must match seg_channels above
             final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
             depth_consistency_mode='gaussian',  # gaussian | bin_linear | None
-            depth_consistency_sigma=12.0,
-            d_bound=[2.0, 76.0, 0.5],
+            depth_consistency_sigma=4.0,
         ),
     ),
 )
@@ -273,9 +271,10 @@ data = dict(
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
         use_semantics=use_semantics,
         use_depth=use_depth,
-        semantic_path=data_root + 'nuscenes_semantic_sam3',
+        # semantic_path=data_root + 'nuscenes_semantic_sam3',
+        semantic_path='../../data/nuscenes_sam3',
         seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
-        depth_path=data_root + 'nuscenes_depth_da3',
+        depth_path='../../data/nuscenes_depth_da3',
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -291,9 +290,10 @@ data = dict(
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
              use_semantics=use_semantics,
              use_depth=use_depth,
-             semantic_path=data_root + 'nuscenes_semantic_sam3',
+            #  semantic_path=data_root + 'nuscenes_semantic_sam3',
+             semantic_path='../../data/nuscenes_sam3',
              seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
-             depth_path=data_root + 'nuscenes_depth_da3',
+             depth_path='../../data/nuscenes_depth_da3',
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1),
     test=dict(type=dataset_type,
@@ -301,9 +301,10 @@ data = dict(
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
               use_semantics=use_semantics,
               use_depth=use_depth,
-              semantic_path=data_root + 'nuscenes_semantic_sam3',
+            #   semantic_path=data_root + 'nuscenes_semantic_sam3',
+              semantic_path='../../data/nuscenes_sam3',
               seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
-              depth_path=data_root + 'nuscenes_depth_da3',
+              depth_path='../../data/nuscenes_depth_da3',
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='DistributedGroupSampler'),

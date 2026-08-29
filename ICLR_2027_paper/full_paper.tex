@@ -1,0 +1,462 @@
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2027_conference,times}
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+
+
+\title{Dense Semantic Priors for Diffusion-Based BEV Representation Learning}
+
+% Authors must not appear in the submitted version. They should be hidden
+% as long as the \iclrfinalcopy macro remains commented out below.
+% Non-anonymous submissions will be rejected without review.
+
+\author{Hyelin Jo \thanks{ Use footnote for providing further information
+about author (webpage, alternative address)---\emph{not} for acknowledging
+funding agencies.  Funding acknowledgements go at the end of the paper.} \\
+Automotive Intelligence X Electrification Lab (AXELab) \\
+Cho Chun Shik Graduate School of Mobility, KAIST \\
+Daejeon, South Korea \\
+\texttt{hyelin.jo@kaist.ac.kr} \\
+\And
+Dongseok Kum \\
+Automotive Intelligence X Electrification Lab (AXELab) \\
+Cho Chun Shik Graduate School of Mobility, KAIST \\
+Daejeon, South Korea \\
+\texttt{professor_email@kaist.ac.kr}
+}
+
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to \LaTeX{} to determine where to break
+% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
+% puts 3 of 4 authors names on the first line, and the last on the second
+% line, try using \AND instead of \And before the third author name.
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+%\iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
+\begin{document}
+
+
+\maketitle
+
+\begin{abstract}
+The abstract paragraph should be indented 1/2~inch (3~picas) on both left and
+right-hand margins. Use 10~point type, with a vertical spacing of 11~points.
+The word \textsc{Abstract} must be centered, in small caps, and in point size 12. Two
+line spaces precede the abstract. The abstract must be limited to one
+paragraph.
+\end{abstract}
+
+%% Please note that we have introduced automatic line number generation
+%% into the style file for \LaTeXe. This is to help reviewers
+%% refer to specific lines of the paper when they make their comments. Please do
+%% NOT refer to these line numbers in your paper as they will be removed from the
+%% style file for the final version of accepted papers.
+
+\section{Introduction}
+Bird's-eye-view (BEV) representations have become fundamental to autonomous
+driving perception by integrating multi-view images into a unified top-down
+space~\citep{SUR1,SUR2,BVF}. They are widely used for diverse downstream tasks,
+including 3D object detection, BEV segmentation, motion prediction, and
+end-to-end planning~\citep{SUR2,BVF,LSS,UniAD,VAD}. However, camera-based BEV
+features are typically learned indirectly through downstream task losses without
+explicit supervision in the latent feature space. Consequently, errors and
+uncertainties introduced during image-to-BEV projection may propagate into the
+resulting BEV representations~\citep{BEVDiff,DiffBEV}.
+
+Recent studies have introduced diffusion models into BEV perception to improve
+BEV representation quality~\citep{DiffBEV,DifFUSER,BEVDiff}. Diffusion models
+learn the underlying data distribution by progressively adding noise to samples
+and training a network to reverse the corruption process~\citep{DDPM,DDIM}.
+When applied to BEV features, the resulting denoising objective provides an
+explicit feature-level training signal for recovering spatially structured
+representations.
+
+Despite their potential, existing BEV diffusion methods often rely on
+task-specific priors or ground-truth annotations for
+conditioning~\citep{BEVDiff,LaneDiff}. In particular, BEVDiffuser constructs a
+ground-truth object layout from object categories and 3D bounding boxes and
+employs a conditioning mechanism specialized for this layout~\citep{BEVDiff}.
+Although such conditioning provides strong task-aligned guidance, it introduces
+additional annotation requirements and couples the diffusion model to 3D object
+detection. Adapting the model to another downstream task may therefore require
+redesigning both the conditioning signal and its injection mechanism.
+
+Task dependency also arises from the training objective. Existing BEV diffusion
+methods commonly optimize the diffusion model together with downstream task
+losses~\citep{BEVDiff,DiffBEV,DifFUSER,DiffVecMap}, directly coupling diffusion
+training to task-specific prediction heads and supervision. Although
+BEVDiffuser~\citep{BEVDiff} removes its diffusion module at inference time, its
+diffusion training still relies on a 3D detection objective. Extending these
+approaches to a new task may therefore require modifying the prediction head and
+training objectives, limiting the transferability of diffusion-based BEV
+refinement across downstream tasks.
+
+To address these limitations, we propose a task-agnostic semantic-guided
+diffusion framework for BEV representation learning, as illustrated in
+Figure~\ref{fig:overview}. Here, task-agnostic means that diffusion training
+does not require task-specific annotations or downstream task supervision. A
+frozen vision foundation model~\citep{SAM3} extracts multi-view semantic masks,
+which are projected into the BEV space to construct a spatially aligned dense
+semantic BEV prior. This prior captures both dynamic agents and static scene
+elements and guides denoising through Semantic BEV Adaptive Modulation (SBAM).
+We first pre-train the diffusion model using only a generative denoising
+objective and then freeze it as a teacher. The denoised BEV representations are
+subsequently transferred to a student BEV model through masked generative
+distillation~\citep{MGD}. At inference time, the diffusion teacher and semantic 
+branch are removed, introducing no additional inference cost.
+
+
+Our main contributions are as follows:
+\begin{itemize}
+    \item We construct a task-agnostic dense semantic BEV prior by projecting
+    semantic masks extracted by a vision foundation model into the BEV space and
+    introduce SBAM to inject this prior into diffusion features, allowing dense
+    structures of both dynamic and static scene elements to guide denoising.
+    
+    \item We decouple diffusion training from downstream task supervision
+    through generative BEV pre-training using only a denoising objective. This
+    enables the BEV diffusion model to learn structured representations without
+    relying on task-specific supervision.
+    
+    \item Building on the plug-and-play paradigm of BEVDiffuser, we introduce
+    masked generative BEV distillation to transfer semantic-guided denoised
+    representations to a student model, achieving competitive performance
+    against task-specific diffusion approaches without additional inference
+    cost.
+\end{itemize}
+
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig6.pdf}
+  \caption{Overview of the proposed diffusion-based BEV representation learning
+  framework. A frozen semantic segmentation model extracts dense semantic masks
+  from multi-view images, which are projected into a semantic BEV prior. The
+  prior guides diffusion-based denoising of the BEV features produced by the
+  image backbone and BEV encoder.}
+  \label{fig:overview}
+\end{figure}
+
+\section{Related Work}
+\textbf{Diffusion Models for BEV Perception}
+Diffusion models have demonstrated strong performance in generative modeling and
+have increasingly been applied to discriminative tasks, including object
+detection and semantic segmentation~\citep{DDPM,LDM,DDet,Segdiff}. Leveraging
+their ability to recover structured representations through iterative
+denoising, recent studies have extended diffusion models to BEV
+perception~\citep{DiffBEV,DifFUSER,DiffVecMap,BEVDiff,LaneDiff}. DiffBEV and
+DifFUSER use learned intermediate features as denoising conditions, which may
+inherit errors from the upstream perception pipeline~\citep{DiffBEV,DifFUSER}.
+To provide more reliable guidance, BEVDiffuser uses a ground-truth object layout
+constructed from object categories and 3D bounding boxes~\citep{BEVDiff},
+whereas LaneDiffusion injects lane centerline priors into BEV
+features~\citep{LaneDiff}. Although effective, these priors depend on
+task-specific annotations or representations and dedicated injection mechanisms,
+limiting their applicability across tasks. Existing approaches also optimize
+diffusion models jointly with task-specific objectives, coupling diffusion
+training to particular downstream
+tasks~\citep{DiffBEV,DifFUSER,DiffVecMap,BEVDiff,LaneDiff}. Extending these
+methods to a new task therefore requires adapting the downstream task head and
+training objectives. In contrast, our method decouples diffusion pre-training
+from task-specific supervision and relies solely on a denoising objective.
+
+\textbf{Semantic Conditioning in Generative Models}
+Semantic layouts, such as segmentation maps, provide dense, spatially aligned
+guidance for controllable image generation. SPADE modulates normalized
+activations using spatially-adaptive affine parameters predicted from semantic
+masks~\citep{SPADE}. Extending this principle to diffusion models, SDM
+separately processes noisy images and semantic layouts and injects the layout
+information into multiple decoder layers through spatially adaptive
+normalization~\citep{SDM}. Other approaches condition pre-trained text-to-image
+diffusion models through additional trainable
+modules~\citep{Controlnet,GLIGEN,T2IAdapter}. ControlNet and T2I-Adapter inject
+external conditions through trainable branches and lightweight adapters,
+respectively~\citep{Controlnet,T2IAdapter}. Uni-ControlNet unifies multiple
+local conditions, including segmentation maps, within a single model and injects
+their multi-scale features through Feature Denormalization (FDN), which
+spatially modulates normalized diffusion features~\citep{Uni-C}. Inspired by
+this line of work, we develop semantic BEV adaptive modulation (SBAM) to inject 
+a dense semantic BEV prior into BEV diffusion features. Unlike image synthesis methods, 
+our semantic condition is constructed by projecting multi-view semantic masks into 
+the BEV space and isused to learn task-agnostic scene representations rather than 
+synthesize images.
+
+
+
+\section{Method}
+\subsection{Preliminaries: Diffusion Models}
+Diffusion models define a forward corruption process that gradually perturbs a
+clean sample with Gaussian noise and learn a reverse process that removes the
+noise~\citep{DDPM,DDIM}. Let $\mathbf{x}_0$ denote a clean BEV feature and
+$t \in \{1,\dots,T\}$ denote a diffusion timestep. The forward process samples a
+noisy feature $\mathbf{x}_t$ as
+\begin{equation}
+\label{eq:forward-diffusion}
+  \mathbf{x}_t =
+  \sqrt{\bar{\alpha}_t}\mathbf{x}_0 +
+  \sqrt{1-\bar{\alpha}_t}\boldsymbol{\epsilon},
+  \qquad
+  \boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}).
+\end{equation}
+where $\bar{\alpha}_t$ is the cumulative product of the noise schedule. A
+denoising network is then trained to recover information about
+$\mathbf{x}_0$ from $\mathbf{x}_t$ and $t$.
+
+Different parameterizations can be used for the denoising target, such as
+predicting the added noise, the clean sample, or the velocity. In this work, we
+use the sample-prediction parameterization and train the denoising network
+$f_{\theta}$ to predict the clean BEV feature. Given a condition $\mathbf{c}$,
+the generic diffusion objective is
+\begin{equation}
+\label{eq:diffusion-objective}
+  \mathcal{L}_{\mathrm{diff}} =
+  \mathbb{E}_{\mathbf{x}_0,t,\boldsymbol{\epsilon}}
+  \left[
+  \left\|f_{\theta}(\mathbf{x}_t,t,\mathbf{c}) - \mathbf{x}_0\right\|_2^2
+  \right].
+\end{equation}
+In the following sections, the condition $\mathbf{c}$ is instantiated as a
+dense semantic BEV prior.
+
+
+
+\subsection{Semantic-Guided BEV Diffusion Pre-training}
+
+We propose a semantic-guided BEV diffusion framework that uses dense semantic
+guidance in place of task-specific conditioning. As illustrated in
+Figure~\ref{fig:overview}, multi-view semantic masks are projected into the BEV
+space to form a dense semantic BEV prior for BEV feature denoising. Training
+proceeds in two stages: generative diffusion pre-training without downstream
+task supervision, followed by feature distillation from the frozen diffusion
+model to downstream BEV perception models. At inference time, the diffusion
+model and semantic branch are not used, preserving the inference cost of the
+underlying BEV model.
+
+
+
+
+
+
+
+
+\section{Experiments}
+% Describe your experiments and results.
+
+\section{Conclusion}
+% Summarize your findings and future work.
+
+
+% \begin{table}[t]
+% \caption{Sample table title}
+% \label{sample-table}
+% \begin{center}
+% \begin{tabular}{ll}
+% \multicolumn{1}{c}{\bf PART}  &\multicolumn{1}{c}{\bf DESCRIPTION}
+% \\ \hline \\
+% Dendrite         &Input terminal \\
+% Axon             &Output terminal \\
+% Soma             &Cell body (contains cell nucleus) \\
+% \end{tabular}
+% \end{center}
+% \end{table}
+
+\section{Default Notation}
+
+In an attempt to encourage standardized notation, we have included the
+notation file from the textbook, \textit{Deep Learning}
+\cite{goodfellow2016deep} available at
+\url{https://github.com/goodfeli/dlbook_notation/}.  Use of this style
+is not required and can be disabled by commenting out
+\texttt{math\_commands.tex}.
+
+
+\centerline{\bf Numbers and Arrays}
+\bgroup
+\def\arraystretch{1.5}
+\begin{tabular}{p{1in}p{3.25in}}
+$\displaystyle a$ & A scalar (integer or real)\\
+$\displaystyle \va$ & A vector\\
+$\displaystyle \mA$ & A matrix\\
+$\displaystyle \tA$ & A tensor\\
+$\displaystyle \mI_n$ & Identity matrix with $n$ rows and $n$ columns\\
+$\displaystyle \mI$ & Identity matrix with dimensionality implied by context\\
+$\displaystyle \ve^{(i)}$ & Standard basis vector $[0,\dots,0,1,0,\dots,0]$ with a 1 at position $i$\\
+$\displaystyle \text{diag}(\va)$ & A square, diagonal matrix with diagonal entries given by $\va$\\
+$\displaystyle \ra$ & A scalar random variable\\
+$\displaystyle \rva$ & A vector-valued random variable\\
+$\displaystyle \rmA$ & A matrix-valued random variable\\
+\end{tabular}
+\egroup
+\vspace{0.25cm}
+
+\centerline{\bf Sets and Graphs}
+\bgroup
+\def\arraystretch{1.5}
+
+\begin{tabular}{p{1.25in}p{3.25in}}
+$\displaystyle \sA$ & A set\\
+$\displaystyle \R$ & The set of real numbers \\
+$\displaystyle \{0, 1\}$ & The set containing 0 and 1 \\
+$\displaystyle \{0, 1, \dots, n \}$ & The set of all integers between $0$ and $n$\\
+$\displaystyle [a, b]$ & The real interval including $a$ and $b$\\
+$\displaystyle (a, b]$ & The real interval excluding $a$ but including $b$\\
+$\displaystyle \sA \backslash \sB$ & Set subtraction, i.e., the set
+containing the elements of $\sA$ that are not in $\sB$\\
+$\displaystyle \gG$ & A graph\\
+$\displaystyle \parents_\gG(\ervx_i)$ & The parents of $\ervx_i$ in $\gG$
+\end{tabular}
+\vspace{0.25cm}
+
+
+\centerline{\bf Indexing}
+\bgroup
+\def\arraystretch{1.5}
+
+\begin{tabular}{p{1.25in}p{3.25in}}
+$\displaystyle \eva_i$ & Element $i$ of vector $\va$, with indexing starting at 1 \\
+$\displaystyle \eva_{-i}$ & All elements of vector $\va$ except for element $i$ \\
+$\displaystyle \emA_{i,j}$ & Element $i, j$ of matrix $\mA$ \\
+$\displaystyle \mA_{i, :}$ & Row $i$ of matrix $\mA$ \\
+$\displaystyle \mA_{:, i}$ & Column $i$ of matrix $\mA$ \\
+$\displaystyle \etA_{i, j, k}$ & Element $(i, j, k)$ of a 3-D tensor $\tA$\\
+$\displaystyle \tA_{:, :, i}$ & 2-D slice of a 3-D tensor\\
+$\displaystyle \erva_i$ & Element $i$ of the random vector $\rva$ \\
+\end{tabular}
+\egroup
+\vspace{0.25cm}
+
+
+\centerline{\bf Calculus}
+\bgroup
+\def\arraystretch{1.5}
+\begin{tabular}{p{1.25in}p{3.25in}}
+% NOTE: the [2ex] on the next line adds extra height to that row of the table.
+% Without that command, the fraction on the first line is too tall and collides
+% with the fraction on the second line.
+$\displaystyle\frac{d y} {d x}$ & Derivative of $y$ with respect to $x$\\ [2ex]
+$\displaystyle \frac{\partial y} {\partial x} $ & Partial derivative of $y$ with respect to $x$ \\
+$\displaystyle \nabla_\vx y $ & Gradient of $y$ with respect to $\vx$ \\
+$\displaystyle \nabla_\mX y $ & Matrix derivatives of $y$ with respect to $\mX$ \\
+$\displaystyle \nabla_\tX y $ & Tensor containing derivatives of $y$ with respect to $\tX$ \\
+$\displaystyle \frac{\partial f}{\partial \vx} $ & Jacobian matrix
+$\mJ \in \R^{m\times n}$ of $f: \R^n \rightarrow \R^m$\\
+$\displaystyle \nabla_\vx^2 f(\vx)\text{ or }\mH( f)(\vx)$ & The Hessian matrix of $f$ at input point $\vx$\\
+$\displaystyle \int f(\vx) d\vx $ & Definite integral over the entire domain of $\vx$ \\
+$\displaystyle \int_\sS f(\vx) d\vx$ & Definite integral with respect to $\vx$ over the set $\sS$ \\
+\end{tabular}
+\egroup
+\vspace{0.25cm}
+
+\centerline{\bf Probability and Information Theory}
+\bgroup
+\def\arraystretch{1.5}
+\begin{tabular}{p{1.25in}p{3.25in}}
+$\displaystyle P(\ra)$ & A probability distribution over a discrete variable\\
+$\displaystyle p(\ra)$ & A probability distribution over a continuous variable, or over
+a variable whose type has not been specified\\
+$\displaystyle \ra \sim P$ & Random variable $\ra$ has distribution $P$\\
+% so thing on left of \sim should always be a random variable, with name beginning with \r
+$\displaystyle  \E_{\rx\sim P} [ f(x) ]\text{ or } \E f(x)$ & Expectation of $f(x)$ with respect to $P(\rx)$ \\
+$\displaystyle \Var(f(x)) $ &  Variance of $f(x)$ under $P(\rx)$ \\
+$\displaystyle \Cov(f(x),g(x)) $ & Covariance of $f(x)$ and $g(x)$ under $P(\rx)$\\
+$\displaystyle H(\rx) $ & Shannon entropy of the random variable $\rx$\\
+$\displaystyle \KL ( P \Vert Q ) $ & Kullback-Leibler divergence of P and Q \\
+$\displaystyle \mathcal{N} ( \vx ; \vmu , \mSigma)$ & Gaussian distribution %
+over $\vx$ with mean $\vmu$ and covariance $\mSigma$ \\
+\end{tabular}
+\egroup
+\vspace{0.25cm}
+
+\centerline{\bf Functions}
+\bgroup
+\def\arraystretch{1.5}
+\begin{tabular}{p{1.25in}p{3.25in}}
+$\displaystyle f: \sA \rightarrow \sB$ & The function $f$ with domain $\sA$ and range $\sB$\\
+$\displaystyle f \circ g $ & Composition of the functions $f$ and $g$ \\
+  $\displaystyle f(\vx ; \vtheta) $ & A function of $\vx$ parametrized by $\vtheta$.
+  (Sometimes we write $f(\vx)$ and omit the argument $\vtheta$ to lighten notation) \\
+$\displaystyle \log x$ & Natural logarithm of $x$ \\
+$\displaystyle \sigma(x)$ & Logistic sigmoid, $\displaystyle \frac{1} {1 + \exp(-x)}$ \\
+$\displaystyle \zeta(x)$ & Softplus, $\log(1 + \exp(x))$ \\
+$\displaystyle || \vx ||_p $ & $\normlp$ norm of $\vx$ \\
+$\displaystyle || \vx || $ & $\normltwo$ norm of $\vx$ \\
+$\displaystyle x^+$ & Positive part of $x$, i.e., $\max(0,x)$\\
+$\displaystyle \1_\mathrm{condition}$ & is 1 if the condition is true, 0 otherwise\\
+\end{tabular}
+\egroup
+\vspace{0.25cm}
+
+
+
+\section{Final instructions}
+Do not change any aspects of the formatting parameters in the style files.
+In particular, do not modify the width or length of the rectangle the text
+should fit into, and do not change font sizes (except perhaps in the
+\textsc{References} section; see below). Please note that pages should be
+numbered.
+
+\section{Preparing PostScript or PDF files}
+
+Please prepare PostScript or PDF files with paper size ``US Letter'', and
+not, for example, ``A4''. The -t
+letter option on dvips will produce US Letter files.
+
+Consider directly generating PDF files using \verb+pdflatex+
+(especially if you are a MiKTeX user).
+PDF figures must be substituted for EPS figures, however.
+
+Otherwise, please generate your PostScript and PDF files with the following commands:
+\begin{verbatim}
+dvips mypaper.dvi -t letter -Ppdf -G0 -o mypaper.ps
+ps2pdf mypaper.ps mypaper.pdf
+\end{verbatim}
+
+\subsection{Margins in LaTeX}
+
+Most of the margin problems come from figures positioned by hand using
+\verb+\special+ or other commands. We suggest using the command
+\verb+\includegraphics+
+from the graphicx package. Always specify the figure width as a multiple of
+the line width as in the example below using .eps graphics
+\begin{verbatim}
+   \usepackage[dvips]{graphicx} ...
+   \includegraphics[width=0.8\linewidth]{myfile.eps}
+\end{verbatim}
+or % Apr 2009 addition
+\begin{verbatim}
+   \usepackage[pdftex]{graphicx} ...
+   \includegraphics[width=0.8\linewidth]{myfile.pdf}
+\end{verbatim}
+for .pdf graphics.
+See section~4.4 in the graphics bundle documentation
+(\url{http://www.ctan.org/tex-archive/macros/latex/required/graphics/grfguide.ps})
+
+
+\subsubsection*{Author Contributions}
+If you'd like to, you may include  a section for author contributions as is done
+in many journals. This is optional and at the discretion of the authors.
+
+\subsubsection*{Acknowledgments}
+Use unnumbered third level headings for the acknowledgments. All
+acknowledgments, including those to funding agencies, go at the end of the paper.
+
+
+\bibliography{iclr2027_conference}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+\section{Appendix}
+You may include other additional sections here.
+
+
+\end{document}

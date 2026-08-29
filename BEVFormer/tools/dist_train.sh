@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -14,7 +14,8 @@ PORT=${PORT:-28506}
 
 CONFIG="./projects/configs/diff_bevformer/layout_tiny_mgd.py"
 UNET_CHECKPOINT_DIR="../results/BEVDiffuser_BEVFormer_tiny_original_bs2/checkpoint-50000"
-LOAD_FROM="./ckpts/bevformer_r101_dcn_24ep.pth"
+# LOAD_FROM="./ckpts/bevformer_r101_dcn_24ep.pth" # BEVFormer-base model
+LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
 # RESUME_FROM="../results/version2/stage2/DiffBEVFormer_tiny_original/epoch_12.pth"
 RUN_NAME="DiffBEVFormer_tiny_original_mgd_24epoch"
 WORK_DIR="../results/version2/stage2"
@@ -25,13 +26,13 @@ PYTHONPATH="$(dirname $0)/..":$PYTHONPATH \
 # python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port=$PORT \
 # torchrun --nproc_per_node=$GPUS --master_port=29503 \
 # taskset -c 16-31,48-63 torchrun --nproc_per_node $GPUS \
-torchrun --nproc_per_node $GPUS \
+taskset -c 0-15,32-47 torchrun --nproc_per_node $GPUS \
     --master_port=$PORT \
     $(dirname "$0")/train.py $CONFIG \
     --launcher pytorch ${@:3} \
     --deterministic \
     --work_dir=$WORK_DIR \
-    --report_to='wandb' \
+    --report_to='tensorboard' \
     --tracker_project_name='DiffBEVFormer' \
     --tracker_run_name=$RUN_NAME \
     --unet_checkpoint_dir=$UNET_CHECKPOINT_DIR \

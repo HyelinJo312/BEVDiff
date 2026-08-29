@@ -38,22 +38,50 @@ from mmdet.apis import set_random_seed
 from mmseg import __version__ as mmseg_version
 
 from mmcv.utils import TORCH_VERSION, digit_version
+# from bevdiffuser import BEVDiffuser
+# from bevdiffuser_dino import BEVDiffuser
+from bevdiffuser_onlyseg import BEVDiffuser
 
-def prepare_test_with_ann(self, index):
-    # self: dataset instance
-    input_dict = self.get_data_info(index)
-    if input_dict is None:
-        return None
-    # ★ ann_info 주입: LoadAnnotations3D가 이걸 찾습니다
-    input_dict['ann_info'] = self.get_ann_info(index)
-    return self.pipeline(input_dict)
+
+def resolve_unet_checkpoint_dir(checkpoint_dir):
+    if checkpoint_dir in [None, 'None']:
+        return checkpoint_dir
+    weights_name = 'diffusion_pytorch_model.safetensors'
+    if osp.isfile(checkpoint_dir):
+        return checkpoint_dir
+    if not osp.isdir(checkpoint_dir):
+        return checkpoint_dir
+    if osp.isfile(osp.join(checkpoint_dir, weights_name)):
+        return checkpoint_dir
+    if osp.isfile(osp.join(checkpoint_dir, 'unet', weights_name)):
+        return checkpoint_dir
+
+    checkpoint_candidates = []
+    for name in os.listdir(checkpoint_dir):
+        if not name.startswith('checkpoint-'):
+            continue
+        step_text = name.split('checkpoint-', 1)[1]
+        if not step_text.isdigit():
+            continue
+        candidate = osp.join(checkpoint_dir, name)
+        if osp.isfile(osp.join(candidate, 'unet', weights_name)):
+            checkpoint_candidates.append((int(step_text), candidate))
+
+    if checkpoint_candidates:
+        return max(checkpoint_candidates)[1]
+    return checkpoint_dir
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
     parser.add_argument('--work_dir', help='the dir to save logs and models')
     parser.add_argument(
-        '--resume-from', help='the checkpoint file to resume from')
+        '--unet_checkpoint_dir', help='the checkpoint file of unet')
+    parser.add_argument(
+        '--load_from', help='the checkpoint file to load from')
+    parser.add_argument(
+        '--resume_from', help='the checkpoint file to resume from')
     parser.add_argument(
         '--no-validate',
         action='store_true',
@@ -103,8 +131,6 @@ def parse_args():
         action='store_true',
         help='automatically scale lr with the number of gpus')
     parser.add_argument(
-    '--load_from', help='the checkpoint file to load weights from')
-    parser.add_argument(
         "--report_to",
         type=str,
         default=None,
@@ -112,17 +138,16 @@ def parse_args():
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
         ))
-    parser.add_argument('--stage', choices=['pretrain','finetune'], default='pretrain')
-    parser.add_argument("--denoise_loss_weight", type=float, default=1.0)
-    parser.add_argument('--bev_checkpoint', 
-                    default="",
-                    help='checkpoint file')
-    parser.add_argument('--unet_checkpoint', 
-                default="",
-                help='checkpoint file')
-
-
-
+    parser.add_argument(
+        "--tracker_project_name",
+        type=str,
+        default="DiffBEVFormer"
+    )
+    parser.add_argument(
+        "--tracker_run_name",
+        type=str,
+        default=None
+    )
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -174,7 +199,6 @@ def main():
                 plg_lib = importlib.import_module(_module_path)
 
             from projects.mmdet3d_plugin.bevformer.apis.train import custom_train_model
-
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
@@ -182,21 +206,40 @@ def main():
     if cfg.get('close_tf32', False):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
+        
+    if args.tracker_run_name is None:
+        args.tracker_run_name = osp.splitext(osp.basename(args.config))[0]
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
         # update configs according to CLI args if args.work_dir is not None
-        cfg.work_dir = args.work_dir
+        # cfg.work_dir = args.work_dir
+        cfg.work_dir = osp.join(args.work_dir, args.tracker_run_name)
     elif cfg.get('work_dir', None) is None:
         # use config filename as default work_dir if cfg.work_dir is None
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
-        
-    # if args.resume_from is not None:
+   
+    if args.unet_checkpoint_dir is not None and (osp.isfile(args.unet_checkpoint_dir) or osp.isdir(args.unet_checkpoint_dir)):
+        args.unet_checkpoint_dir = resolve_unet_checkpoint_dir(
+            args.unet_checkpoint_dir)
+        print(f'[onestep] resolved unet_checkpoint_dir: {args.unet_checkpoint_dir}')
+        if cfg.bev_diffuser_cfg:
+            cfg.bev_diffuser_cfg.unet_checkpoint_dir = args.unet_checkpoint_dir
+        if cfg.model.get('student_diffuser_cfg', None):
+            cfg.model.student_diffuser_cfg.unet_checkpoint_dir = args.unet_checkpoint_dir
     if args.resume_from is not None and osp.isfile(args.resume_from):
         cfg.resume_from = args.resume_from
     if args.load_from is not None and osp.isfile(args.load_from):
         cfg.load_from = args.load_from
+    if cfg.model.type == 'OneStepDiffBEVFormerSeg':
+        if cfg.get('load_from', None) is not None:
+            print(
+                '[onestep] ignoring cfg.load_from for scratch Stage-2 '
+                'BEVFormer. Use --resume_from only to resume an existing '
+                'one-step run. Diffusion weights are loaded via '
+                '--unet_checkpoint_dir.')
+        cfg.load_from = None
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
     else:
@@ -206,17 +249,23 @@ def main():
     if args.autoscale_lr:
         # apply the linear scaling rule (https://arxiv.org/abs/1706.02677)
         cfg.optimizer['lr'] = cfg.optimizer['lr'] * len(cfg.gpu_ids) / 8
+    
+    if args.report_to == "wandb":        
+        cfg.log_config.hooks.append(
+            dict(type="WandbLoggerHook",
+                 init_kwargs=dict(project=args.tracker_project_name,
+                                  name=args.tracker_run_name,
+                                #   id=args.tracker_run_name,
+                                  )
+                 )
+        )
+        print(args.tracker_run_name)
 
-    if args.denoise_loss_weight is not None:
-        cfg.model.pts_bbox_head.denoise_loss_weight = args.denoise_loss_weight
-
-    # cfg.setdefault('find_unused_parameters', True)
-
-    # elif args.report_to == "tensorboard":
-    #     cfg.log_config.hooks.append(
-    #         dict(type="TensorboardLoggerHook")
-    #     )
-    #     print("[tensorboard] logger enabled", args.tracker_run_name)
+    elif args.report_to == "tensorboard":
+        cfg.log_config.hooks.append(
+            dict(type="TensorboardLoggerHook")
+        )
+        print("[tensorboard] logger enabled", args.tracker_run_name)
 
     # init distributed env first, since logger depends on the dist info.
     if args.launcher == 'none':
@@ -244,14 +293,10 @@ def main():
         logger_name = 'mmdet'
     logger = get_root_logger(
         log_file=log_file, log_level=cfg.log_level, name=logger_name)
-    # logger = get_root_logger(
-    #     log_file=log_file, log_level=cfg.log_level, name='myproj')
-
 
     # init the meta dict to record some important information such as
     # environment info and seed, which will be logged
     meta = dict()
-
     # log env info
     env_info_dict = collect_env()
     env_info = '\n'.join([(f'{k}: {v}') for k, v in env_info_dict.items()])
@@ -276,59 +321,30 @@ def main():
     meta['seed'] = args.seed
     meta['exp_name'] = osp.basename(args.config)
 
-    # build the model 
     model = build_model(
         cfg.model,
         train_cfg=cfg.get('train_cfg'),
         test_cfg=cfg.get('test_cfg'))
     model.init_weights()
-    logger.info(f'Model:\n{model}')
     
-    if args.bev_checkpoint is not None and (os.path.isfile(args.bev_checkpoint)):
-        ckpt_path = args.bev_checkpoint
-        raw = torch.load(ckpt_path, map_location='cpu')
-        state = raw.get('state_dict', raw)
+    if not cfg.get('train_task_decoder', True):
+        model.pts_bbox_head.transformer.decoder.requires_grad_(False)
+        model.pts_bbox_head.transformer.reference_points.requires_grad_(False)
+        model.pts_bbox_head.cls_branches.requires_grad_(False)
+        model.pts_bbox_head.reg_branches.requires_grad_(False)
 
-        def strip_prefix_if_present(k, prefix='module.'):
-            return k[len(prefix):] if k.startswith(prefix) else k
-        state = {strip_prefix_if_present(k): v for k, v in state.items()}
-
-        src_prefix = 'pts_bbox_head.transformer.'
-        cand = {k[len(src_prefix):]: v for k, v in state.items() if k.startswith(src_prefix)}
-        dst_sd = model.pts_bbox_head.transformer.state_dict()
-        sub_state = {}
-        skipped_shape = []
-        skipped_missing = []
-        
-        for k, v in cand.items():
-            if k in dst_sd:
-                if dst_sd[k].shape == v.shape:
-                    sub_state[k] = v
-                else:
-                    skipped_shape.append((k, tuple(v.shape), tuple(dst_sd[k].shape)))
-            else:
-                skipped_missing.append(k)
-
-        missing, unexpected = model.pts_bbox_head.transformer.load_state_dict(sub_state, strict=False)
-        logger.info(f'[Transformer partial load] loaded={len(sub_state)} '
-                f'missing_after_load={len(missing)} unexpected={len(unexpected)} '
-                f'skipped_shape={len(skipped_shape)} skipped_missing={len(skipped_missing)}')
-        
-    if args.unet_checkpoint is not None:
-        cfg.model.pts_bbox_head.unet.pretrained_checkpoint = args.unet_checkpoint
-        
+    logger.info(f'Model:\n{model}')
     dataset_default_args = {
         'pc_range': cfg.point_cloud_range,
         'use_3d_bbox': cfg.use_3d_bbox,
         'num_classes': cfg.num_classes,
         'num_bboxes': cfg.num_bboxes,
+        # 'class_names': cfg.total_class,
+        # 'seg_class': cfg.seg_class
     }
-
     datasets = [build_dataset(cfg.data.train,
                               default_args=dataset_default_args)]
-    
-
-    if len(cfg.workflow) == 2:   #  include val for training
+    if len(cfg.workflow) == 2:
         val_dataset = copy.deepcopy(cfg.data.val)
         # in case we use a dataset wrapper
         if 'dataset' in cfg.data.train:
@@ -341,7 +357,6 @@ def main():
         val_dataset.test_mode = False
         datasets.append(build_dataset(val_dataset,
                                       default_args=dataset_default_args))
-        
     if cfg.checkpoint_config is not None:
         # save mmdet version, config file content and class names in
         # checkpoints as meta data
@@ -353,9 +368,40 @@ def main():
             CLASSES=datasets[0].CLASSES,
             PALETTE=datasets[0].PALETTE  # for segmentors
             if hasattr(datasets[0], 'PALETTE') else None)
-
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    
+    bev_diffuser = None
+    if cfg.model.type == 'OneStepDiffBEVFormerSeg':
+        assert cfg.model.get('student_diffuser_cfg', None) is not None, (
+            'OneStepDiffBEVFormerSeg requires model.student_diffuser_cfg.')
+        assert cfg.get('bev_diffuser_cfg', None) is not None, (
+            'One-step training requires cfg.bev_diffuser_cfg for the frozen '
+            'conditional teacher.')
+        assert cfg.data.train.get('use_semantics', False), (
+            'One-step teacher training requires semantic condition. Set '
+            'data.train.use_semantics=True.')
+        if cfg.data.train.get('use_depth', False):
+            assert cfg.data.train.get('depth_path', None) is not None, (
+                'data.train.use_depth=True requires data.train.depth_path.')
+
+    if cfg.get('bev_diffuser_cfg', None) is not None:
+        if cfg.model.type == 'OneStepDiffBEVFormerSeg':
+            one_step_timestep = cfg.model.get('one_step_timestep', 100)
+            teacher_steps = cfg.model.get('teacher_num_inference_steps', 5)
+            assert cfg.bev_diffuser_cfg.noise_timesteps == 0, (
+                'One-step teacher must receive shared noisy_bev directly. '
+                'Set bev_diffuser_cfg.noise_timesteps=0.')
+            assert cfg.bev_diffuser_cfg.denoise_timesteps == one_step_timestep, (
+                'bev_diffuser_cfg.denoise_timesteps must match '
+                'model.one_step_timestep.')
+            assert cfg.bev_diffuser_cfg.num_inference_steps == teacher_steps, (
+                'bev_diffuser_cfg.num_inference_steps must match '
+                'model.teacher_num_inference_steps.')
+        bev_diffuser = BEVDiffuser(**cfg.bev_diffuser_cfg)
+        bev_diffuser.requires_grad_(False)
+        bev_diffuser.eval()
+        
     custom_train_model(
         model,
         datasets,
@@ -363,8 +409,11 @@ def main():
         distributed=distributed,
         validate=(not args.no_validate),
         timestamp=timestamp,
-        meta=meta)
+        meta=meta,
+        model_target=None,
+        bev_diffuser=bev_diffuser)
 
 
 if __name__ == '__main__':
+    os.environ['TORCH_DISTRIBUTED_DEBUG']='INFO'
     main()

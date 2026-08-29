@@ -1,0 +1,34 @@
+Dense Semantic Priors for Diffusion-Based BEV Representation Learning
+
+Previous Works
+-	Camera-based BEV Perception: LSS (ECCV 20), BEVFormer (ECCV 22)
+-	Diffusion-based BEV Perception: DiffBEV (AAAI 24), DifFUSER (ECCV 24), BEVDiffuser (CVPR 25), DiffVecMap (RA-L 26)
+-	Semantic-guided Generative Models: SPADE (CVPR 19), ControlNet (ICCV 23), Uni-ControlNet (NeurIPS 23)
+
+Limitations of Previous Works
+1. Camera-based BEV Perception의 feature-level supervision 부재
+대부분의 camera-based BEV models는 latent BEV feature에 대한 explicit supervision 없이 downstream task loss를 통해 간접적으로 학습됨. 이로 인해 image-to-BEV projection 과정의 uncertainty와 error가 BEV representation에 남아 성능을 제한할 수 있음.
+2. Task-specific Conditioning의 한계
+기존 BEV diffusion methods는 효과적인 guidance를 위해 task-specific priors 또는 GT annotations에 의존. BEVDiffuser는 GT object layout을 condition으로 사용하며, conditioning mechanism 역시 해당 prior에 맞게 설계됨. 따라서 annotation burden이 발생하며, downstream task 변경 시 conditioning의 adaptation이 필요함.
+3. Task-coupled Diffusion Training Objectives의 한계
+기존 BEV diffusion methods (DiffBEV, DiFUSER, BEVDiffuser)는 diffusion 학습 시 downstream task loss와 함께 최적화하는 경우가 대다수. 이러한 task coupling은 새로운 task로 확장할 때 prediction head와 training objective의 변경이 필요함.
+
+
+Extended Outline (Introduction)
+Paragraph 1: Diffusion for BEV Representation Learning
+BEV representation은 multi-view images를 unified top-down space로 통합하여 다양한 자율주행 task에 활용됨. 그러나, camera-based BEV feature는 보통 downstream task loss를 통해 간접적으로 학습되므로, view transform의 error나 uncertainty가 feature-level에서 충분히 보정되지 않을 수 있음. Diffusion model은 denoising 을 통해 explicit feature-level training signal을 제공하여 BEV feature denoising 및 refinement에 활용될 수 있음.
+Paragraph 2: Task-specific Conditioning의 한계
+일부 BEV diffusion methods는 task-specific priors나 GT annotations에 의존하여 BEV denoising을 수행함. 대표적으로 BEVDiffuser는 3D object annotations 기반의 GT object layout을 condition으로 사용하며, conditioning mechanism 역시 해당 prior에 맞게 설계됨. 따라서 annotation burden이 발생하고, downstream task 변경 시 conditioning 전체의 adaptation이 필요함.
+Paragraph 3: Task-coupled Diffusion Training Objectives의 한계
+대부분의 기존 BEV diffusion methods는 diffusion model을 downstream task loss와 함께 최적화하여, diffusion training을 특정 task supervision에 직접 결합함. 따라서 새로운 task로 확장할 경우 task head와 training objective의 변경이 필요하며, general BEV representation learning에 제약이 됨.
+Paragraph 4: Task-agnostic semantic guidance 기반 BEV diffusion 제안
+이러한 한계를 해결하기 위해 본 연구는 task-agnostic semantic-guided BEV diffusion framework를 제안함. Vision Foundation model 기반 semantic BEV prior와 generative pre-training만으로 diffusion model을 학습하고, 이를 frozen teacher로 활용하여 Masked Generative Distillation을 통해 denoised BEV feature를 student에 전달함. GT-based conditioning과 task supervision 없이도 기존 task-specific diffusion methods와 유사한 수준의 성능을 달성함. Inference 시에는 diffusion teacher와 semantic branch를 제거하여 추가 inference cost가 없음.
+
+
+Contributions
+1. Task-agnostic Dense Semantic BEV Prior
+Vision Foundation Model의 semantic masks를 BEV 공간으로 projection하여 dense semantic BEV prior를 구성하고, 이를 BFDN(BEV Feature Denormalization)을 통해 diffusion에 주입함. BFDN은 semantic prior에 따라 BEV feature의 spatial statistics를 조절하여, dynamic/static scene elements를 포함한 dense scene structure가 denoising 과정에 직접 반영되도록 함.
+2. Task-Decoupled Generative BEV Pre-training 
+기존 BEV diffusion methods와 달리, downstream task supervision과 diffusion training을 분리하고 diffusion objective만으로 generative pre-training을 수행함. 이를 통해 task-specific  objective에 의존하지 않는 BEV diffusion model을 학습함.
+3. Effective Transfer of Generative BEV Representations
+BEVDiffuser의 plug-and-play paradigm을 기반으로, denoised BEV feature를 효과적으로 전달하기 위해 Masked Generative BEV Distillation을 도입함. Diffusion pre-training 단계에서 GT-based conditioning과 task supervision을 사용하지 않고도, 최종 student BEV model이 기존 task-specific diffusion methods와 유사한 수준의 성능을 달성함.

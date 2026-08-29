@@ -150,7 +150,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     def forward(self, x, emb, seg_cond=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
-                if isinstance(layer, BFDNResBlock):
+                if isinstance(layer, SBAMResBlock):
                     x = layer(x, emb, seg_cond)
                 elif isinstance(layer, ResBlock):
                     x = layer(x, emb)
@@ -359,7 +359,7 @@ class FDN(nn.Module):
         out = normalized * (1 + gamma) + beta
         return out
 
-class BFDNResBlock(TimestepBlock):
+class SBAMResBlock(TimestepBlock):
     def __init__(
             self,
             channels,
@@ -451,7 +451,7 @@ class DiffusionUNetModel(nn.Module):
 
     Conditioning:
       - Semantic BEV (Grounded-SAM seg map -> SegBEVAligner) injected via FDN
-        in EVERY decoder block (BFDNResBlock).
+        in EVERY decoder block (SBAMResBlock).
       - No DINO / layout condition. Attention blocks are `SelfAttnTransformer`,
         i.e. pure self-attention with the redundant cross-attention branch removed.
 
@@ -665,7 +665,7 @@ class DiffusionUNetModel(nn.Module):
                 ich = input_block_chans.pop()
                 if i == 0 or i == 2:  
                     layers = [
-                        BFDNResBlock(
+                        SBAMResBlock(
                             ch + ich,
                             time_embed_dim,
                             dropout,
@@ -746,7 +746,7 @@ class DiffusionUNetModel(nn.Module):
 
     def enable_gradient_checkpointing(self):
         for m in self.modules():
-            if isinstance(m, BFDNResBlock):
+            if isinstance(m, SBAMResBlock):
                 m.use_checkpoint = True
 
     def encode_seg(self, seg_cond, img_metas, depth_maps=None):
