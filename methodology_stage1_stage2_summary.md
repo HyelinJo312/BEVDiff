@@ -36,7 +36,7 @@ Stage 1에서는 downstream task head를 붙이지 않는다. 즉, detection hea
 - Multi-view semantic segmentation map을 `SegBEVAligner`로 BEV 공간에 정렬한다.
 - 정렬된 semantic BEV feature는 multi-scale BEV prior로 사용된다.
 - UNet의 attention block은 외부 layout context 없이 self-attention으로 동작한다.
-- Semantic prior는 decoder의 BFDN/FDN path를 통해 spatially adaptive normalization 형태로 주입된다.
+- Semantic prior는 decoder의 SBAM path를 통해 spatially adaptive normalization 형태로 주입된다.
 - 따라서 semantic condition은 object token을 attention으로 참조하는 수준이 아니라, BEV feature의 spatial statistics 자체를 semantic-dependent하게 조절한다.
 
 ### Semantic BEV Prior Construction Details
@@ -141,7 +141,7 @@ Downstream model이 task loss만으로 학습할 때보다 더 semantic-aware한
 - `mgd_alpha=100`
 - `mgd_lambda=0.6`
 
-MGD를 쓰는 이유는 teacher feature가 semantic FDN modulation을 거치면서 student의 원래 BEVFormer feature 분포와 달라지기 때문이다. 단순 MSE보다 masked generation 방식이 teacher-student feature gap을 더 안정적으로 흡수한다는 논리로 설명할 수 있다.
+MGD를 쓰는 이유는 teacher feature가 SBAM modulation을 거치면서 student의 원래 BEVFormer feature 분포와 달라지기 때문이다. 단순 MSE보다 masked generation 방식이 teacher-student feature gap을 더 안정적으로 흡수한다는 논리로 설명할 수 있다.
 
 ### Key Implementation Files
 
@@ -223,7 +223,7 @@ Feature alignment analysis is needed to explain why direct MSE distillation is n
 The key hypothesis is:
 
 - The baseline BEVDiffuser teacher is conditioned by GT layout and remains relatively close to the student BEVFormer feature space.
-- The semantic-only teacher injects dense semantic BEV priors through SB-FDN, which can shift feature statistics more strongly.
+- The semantic-only teacher injects dense semantic BEV priors through SBAM, which can shift feature statistics more strongly.
 - Therefore, the semantic-only teacher may be more informative but farther from the camera-only student feature distribution.
 - Direct MSE can over-constrain the student to match teacher features point-wise, while MGD can absorb the teacher's semantic structure more flexibly.
 
@@ -263,7 +263,7 @@ Recommended figures:
 - `|S - T|` error heatmaps for baseline teacher and semantic-only teacher.
 - Student trained with direct MSE vs student trained with MGD.
 - Semantic boundary or object-region zoom-ins.
-- SB-FDN modulation magnitude map to show where semantic prior changes the diffusion feature.
+- SBAM modulation magnitude map to show where semantic prior changes the diffusion feature.
 
 For PCA visualization, noisy BEV, denoised BEV, and clean target BEV should be projected using the same PCA basis. This is useful as a Stage 1 denoising sanity check, but the stronger paper figure is the Stage 2 feature alignment visualization above.
 
@@ -275,7 +275,7 @@ Semantic BEV Prior Only is better positioned for cross-task transfer:
 
 - Stage 1 teacher is trained without a downstream task head.
 - The condition is dense scene semantics, not detection-specific object layout.
-- The same conditioning interface, SegBEVAligner, SB-FDN injection, and task-head-free denoising recipe can be used for both 3D detection and BEV segmentation.
+- The same conditioning interface, SegBEVAligner, SBAM injection, and task-head-free denoising recipe can be used for both 3D detection and BEV segmentation.
 - The actual diffusion teacher checkpoint may be task-specific because each task can use a different pretrained BEV encoder feature as the clean target.
 - For BEV segmentation, Stage 1 can use a segmentation-pretrained BEV encoder feature as the clean target, and Stage 2 can replace the detection head/loss with a segmentation head/loss while keeping the semantic conditioning design unchanged.
 
@@ -297,7 +297,7 @@ However, the method can still be competitive if the paper is framed as a **metho
 For a stronger submission, the current result should be supported with:
 
 - repeated runs or variance analysis,
-- ablation against layout-only, semantic-only without FDN, MSE vs MGD, and semantic-augmented layout,
+- ablation against layout-only, semantic-only without SBAM, MSE vs MGD, and semantic-augmented layout,
 - feature alignment analysis with MSE, cosine similarity, CKA, and region-wise alignment,
 - annotation-cost or condition-dependence comparison,
 - qualitative BEV feature / detection visualizations showing semantic prior effects,

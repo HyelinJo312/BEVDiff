@@ -1,0 +1,122 @@
+jhl-bevdiff environment summary for BEVDiffV2
+Generated from: /rhome/hyelin/projects/BEVDiffV2
+
+1. Environment
+
+- Conda env name: jhl-bevdiff
+- Env path: /rhome/hyelin/miniconda3/envs/jhl-bevdiff
+- Python executable: /rhome/hyelin/miniconda3/envs/jhl-bevdiff/bin/python
+- Python version: 3.8.20
+- Platform: Linux-5.4.0-216-generic-x86_64-with-glibc2.17
+- pip: 24.2
+- setuptools: 59.5.0
+
+Note:
+- The current shell showed base as active in `conda env list`.
+- All package information below was checked with `conda run -n jhl-bevdiff ...`.
+
+2. PyTorch / CUDA
+
+- torch: 1.10.0+cu111
+- torchvision: 0.11.1+cu111
+- torchaudio: 0.10.0+cu111
+- Torch CUDA build: 11.1
+- Torch git version: 36449ea93134574c2a22b87baad3de0bf8d64d42
+- cuDNN version: 8005
+- torch.cuda.is_available(): True
+- torch.cuda.device_count(): 8
+- GPU devices: NVIDIA RTX A6000 x 8
+- NVIDIA driver: 570.133.07
+- nvidia-smi CUDA version: 12.8
+
+Interpretation:
+- The installed PyTorch wheel is built for CUDA 11.1.
+- The system driver supports CUDA 12.8, which is backward-compatible with the CUDA 11.1 PyTorch runtime.
+
+3. OpenMMLab packages
+
+- mmcv-full: 1.4.0
+- mmcv import version: 1.4.0
+- standalone mmcv package: not separately installed
+- mmdet: 2.14.0
+- mmdet3d: 0.17.1
+- mmsegmentation: 0.14.1
+- detectron2: 0.6+cu111
+
+Import locations:
+
+- mmcv: /rhome/hyelin/miniconda3/envs/jhl-bevdiff/lib/python3.8/site-packages/mmcv/__init__.py
+- mmdet: /rhome/hyelin/miniconda3/envs/jhl-bevdiff/lib/python3.8/site-packages/mmdet/__init__.py
+- mmdet3d: /rhome/hyelin/projects/BEVDiffV2/mmdetection3d/mmdet3d/__init__.py
+- mmseg: /rhome/hyelin/miniconda3/envs/jhl-bevdiff/lib/python3.8/site-packages/mmseg/__init__.py
+
+Important:
+- mmdet3d is installed in editable/develop mode from:
+  /rhome/hyelin/projects/BEVDiffV2/mmdetection3d
+- Local changes under this mmdetection3d directory are reflected directly in the jhl-bevdiff environment.
+
+4. mmdet3d custom CUDA ops
+
+The following compiled extension modules were import-tested successfully:
+
+- mmdet3d.ops.spconv.sparse_conv_ext
+  /rhome/hyelin/projects/BEVDiffV2/mmdetection3d/mmdet3d/ops/spconv/sparse_conv_ext.cpython-38-x86_64-linux-gnu.so
+
+- mmdet3d.ops.iou3d.iou3d_cuda
+  /rhome/hyelin/projects/BEVDiffV2/mmdetection3d/mmdet3d/ops/iou3d/iou3d_cuda.cpython-38-x86_64-linux-gnu.so
+
+- mmdet3d.ops.voxel.voxel_layer
+  /rhome/hyelin/projects/BEVDiffV2/mmdetection3d/mmdet3d/ops/voxel/voxel_layer.cpython-38-x86_64-linux-gnu.so
+
+Note:
+- A separate PyPI package named spconv is not installed.
+- This repo uses mmdet3d's internal compiled spconv extension instead.
+
+5. Selected package versions
+
+- numpy: 1.19.5
+- numba: 0.48.0
+- networkx: 2.2
+- trimesh: 2.35.39
+- opencv-python: 4.13.0.92
+- scipy: 1.10.1
+- scikit-image: 0.19.3
+- nuscenes-devkit: 1.1.10
+- lyft-dataset-sdk: 0.0.8
+- pandas: 1.4.4
+- matplotlib: 3.5.2
+- pillow: 10.4.0
+- pycocotools: 2.0.7
+- timm: 0.6.13
+- einops: 0.8.1
+- diffusers: 0.35.1
+- transformers: 4.46.3
+- accelerate: 0.20.3
+- wandb: 0.15.8
+- tensorboard: 2.14.0
+- torchmetrics: 0.3.2
+
+6. Project requirement notes
+
+From mmdetection3d/requirements/runtime.txt:
+
+- networkx>=2.2,<2.3
+- numba==0.48.0
+- numpy<1.20.0
+- trimesh>=2.35.39,<2.35.40
+- lyft_dataset_sdk
+- nuscenes-devkit
+- plyfile
+- scikit-image
+- tensorboard
+
+The installed versions match the key pinned/limited requirements for this MMDetection3D 0.17.1-era setup.
+
+7. Useful commands to re-check
+
+conda env list
+conda list -n jhl-bevdiff
+conda run -n jhl-bevdiff python -m pip list
+conda run -n jhl-bevdiff python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+conda run -n jhl-bevdiff python -c "import mmcv, mmdet, mmdet3d, mmseg; print(mmcv.__version__, mmdet.__version__, mmdet3d.__version__, mmseg.__version__)"
+nvidia-smi

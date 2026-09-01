@@ -1,88 +1,126 @@
 # Semantic BEV Prior Experiment Results
 
-## Main Result Table
+## 0. Result Source
 
-| Method | Teacher Signal | Distillation | NDS ↑ | mAP ↑ |
-|---|---|---|---:|---:|
-| BEVFormer 24e | - | - | 35.56 | 25.47 |
-| BEVDiffuser | GT layout | MSE | 38.71 | 28.84 |
-| BEVDiffuser | GT layout | MGD | 39.42 | 29.26 |
-| Ours | Semantic BEV | MSE | 38.46 | 28.02 |
-| Ours | Semantic BEV | MGD | 39.03 | 29.09 |
+All numeric experiment results are tracked in this file. The experiment plan should describe table structure and experimental intent only.
 
-## Key Takeaways
+| Method | Result Directory | Log Used | Eval Epoch |
+|---|---|---|---:|
+| Ours (MGD) | `results/version2/stage2/DiffBEVFormer_tiny_onlyseg_sam_mgd_v9_t100_alpha100_lambda_0.6` | `20260826_115011.log.json` | 24 |
+| Ours (MSE) | `results/version2/stage2/DiffBEVFormer_tiny_onlyseg_sam_da3_no-mgd` | `20260831_110247.log.json` | 24 |
 
-### 1. Semantic BEV teacher provides useful transfer signal
+Note: `DiffBEVFormer_tiny_onlyseg_sam_da3_no-mgd` also contains `20260829_153048`, but that log only has an epoch-12 validation result and is not used as the final Ours (MSE) number.
 
-`Ours + MSE` improves clearly over the BEVFormer 24e baseline:
+## 1. Main Detection Result
 
-| Comparison | ΔNDS | ΔmAP |
-|---|---:|---:|
-| Ours + MSE vs BEVFormer 24e | +2.90 | +2.55 |
+| Method | Teacher Signal | Stage 1 Task Head | Distillation | NDS ↑ | mAP ↑ | mATE ↓ | mASE ↓ | mAOE ↓ | mAVE ↓ | mAAE ↓ |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| BEVFormer 24e | none | no | none | 35.56 | 25.47 |  |  |  |  |  |
+| BEVDiffuser | GT layout | yes | MSE | 38.71 | 28.84 | 0.8707 |  | 0.5801 |  |  |
+| BEVDiffuser | GT layout | yes | MGD | 39.42 | 29.26 |  |  |  |  |  |
+| Ours | Semantic BEV + SB-FDN | no | MSE | 38.48 | 27.98 | 0.8632 | 0.2841 | 0.5897 | 0.6103 | 0.2035 |
+| Ours | Semantic BEV + SB-FDN | no | MGD | 38.90 | 29.26 | 0.8526 | 0.2831 | 0.6127 | 0.6125 | 0.2125 |
 
-This indicates that the semantic BEV teacher is not a weak or irrelevant signal. Even with direct MSE, it transfers useful BEV information to the student.
+## 2. Core Comparisons
 
-### 2. Direct MSE is not sufficient for semantic-only teacher transfer
+### 2-A. Ours vs Baseline
 
-Compared with the original BEVDiffuser setting, `Ours + MSE` is lower:
+| Comparison | ΔNDS | ΔmAP | Interpretation |
+|---|---:|---:|---|
+| Ours (MSE) vs BEVFormer 24e | +2.92 | +2.51 | Semantic BEV teacher is useful even with direct MSE |
+| Ours (MGD) vs BEVFormer 24e | +3.34 | +3.79 | Full semantic teacher + MGD gives clear downstream transfer gain |
 
-| Comparison | ΔNDS | ΔmAP |
-|---|---:|---:|
-| Ours + MSE vs BEVDiffuser + MSE | -0.25 | -0.82 |
+### 2-B. Ours vs Original BEVDiffuser
 
-This suggests that directly copying semantic-only teacher features with point-wise MSE is suboptimal. The semantic BEV teacher is useful, but it is harder to exploit with direct feature matching than the GT-layout BEVDiffuser teacher.
+The main paper comparison should be Ours (MGD) against the original BEVDiffuser setting, not against BEVDiffuser + MGD.
 
-### 3. MGD is important for semantic-only teacher transfer
+| Comparison | ΔNDS | ΔmAP | ΔmATE | ΔmAOE | Interpretation |
+|---|---:|---:|---:|---:|---|
+| Ours (MGD) vs BEVDiffuser (MSE) | +0.19 | +0.42 | -0.0181 | +0.0326 | Comparable transfer without GT layout or Stage 1 task head |
 
-For our semantic BEV teacher, replacing MSE with MGD gives a large gain:
+Ours improves mATE but has worse mAOE than BEVDiffuser (MSE). The safest claim is therefore BEVDiffuser-level detection transfer, not uniformly better detection quality on every metric.
 
-| Comparison | ΔNDS | ΔmAP |
-|---|---:|---:|
-| Ours + MGD vs Ours + MSE | +0.57 | +1.07 |
+### 2-C. Strong Control
 
-The mAP improvement is especially large. This supports using MGD as the distillation method in the full semantic-only formulation.
+| Comparison | ΔNDS | ΔmAP | Interpretation |
+|---|---:|---:|---|
+| Ours (MGD) vs BEVDiffuser (MGD) | -0.52 | +0.00 | Privileged GT-layout teacher remains stronger on NDS when also given MGD |
 
-### 4. MGD is a general robust distillation method, not a semantic-only trick
+`BEVDiffuser + MGD` should be presented as a strong loss-control or privileged-condition control. It is not the main baseline for the claim about removing GT layout.
 
-BEVDiffuser also benefits from MGD:
+## 3. MGD vs Direct MSE
 
-| Comparison | ΔNDS | ΔmAP |
-|---|---:|---:|
-| BEVDiffuser + MGD vs BEVDiffuser + MSE | +0.72 | +0.42 |
+| Teacher | Teacher Condition | MSE NDS ↑ | MSE mAP ↑ | MGD NDS ↑ | MGD mAP ↑ | MGD Gain |
+|---|---|---:|---:|---:|---:|---|
+| BEVDiffuser | GT layout | 38.71 | 28.84 | 39.42 | 29.26 | +0.71 NDS / +0.42 mAP |
+| Ours | Semantic BEV + SB-FDN | 38.48 | 27.98 | 38.90 | 29.26 | +0.42 NDS / +1.28 mAP |
 
-Therefore, MGD should be interpreted as a generally useful BEV distillation method. However, the mAP gain is larger for the semantic-only teacher, suggesting that MGD is particularly helpful when transferring semantic BEV teacher features.
+Interpretation:
 
-### 5. Ours reaches original BEVDiffuser-level transfer without GT layout
+- MGD improves both BEVDiffuser and Ours, so it should be framed as a generally useful BEV distillation strategy.
+- The mAP gain is much larger for Ours, which supports the claim that MGD is especially helpful when transferring semantic-only teacher features.
+- Ours (MSE) is already above the BEVFormer baseline, so the semantic teacher signal is not weak; it is simply harder to exploit with point-wise copying.
 
-The main comparison is the original BEVDiffuser setting against our full method:
+## 4. Detailed Ours Results
 
-| Comparison | ΔNDS | ΔmAP |
-|---|---:|---:|
-| Ours + MGD vs BEVDiffuser + MSE | +0.32 | +0.25 |
+### 4-A. Ours (MGD)
 
-Ours achieves comparable and slightly better performance than the original BEVDiffuser while using semantic BEV teacher signal instead of GT layout conditioning.
+Source: `results/version2/stage2/DiffBEVFormer_tiny_onlyseg_sam_mgd_v9_t100_alpha100_lambda_0.6/20260826_115011.log.json`
 
-### 6. BEVDiffuser + MGD is a strong control, not the main baseline
+| Metric | Value |
+|---|---:|
+| NDS | 0.38897 |
+| mAP | 0.29262 |
+| mATE | 0.8526 |
+| mASE | 0.2831 |
+| mAOE | 0.6127 |
+| mAVE | 0.6125 |
+| mAAE | 0.2125 |
 
-`BEVDiffuser + MGD` gives the highest NDS and mAP in this table:
+### 4-B. Ours (MSE)
 
-| Comparison | ΔNDS | ΔmAP |
-|---|---:|---:|
-| Ours + MGD vs BEVDiffuser + MGD | -0.39 | -0.17 |
+Source: `results/version2/stage2/DiffBEVFormer_tiny_onlyseg_sam_da3_no-mgd/20260831_110247.log.json`
 
-This control shows that GT-layout BEVDiffuser also benefits from MGD. It should be used as a loss-control or privileged-condition control, not as the main baseline for the original BEVDiffuser comparison.
+| Metric | Value |
+|---|---:|
+| NDS | 0.38482 |
+| mAP | 0.27979 |
+| mATE | 0.8632 |
+| mASE | 0.2841 |
+| mAOE | 0.5897 |
+| mAVE | 0.6103 |
+| mAAE | 0.2035 |
 
-## Final Interpretation
+## 5. Stage 1 Diagnostic Result
 
-The safe conclusion is not that semantic BEV conditioning alone outperforms BEVDiffuser. Instead, the result supports the following claim:
+This result should remain an appendix diagnostic, not a main comparison.
 
-> Ours achieves comparable and slightly better performance than the original BEVDiffuser while removing GT layout conditioning and task-head supervision from the teacher.
+| Method | NDS ↑ | mAP ↑ | Setting |
+|---|---:|---:|---|
+| BEVDiffuser-tiny | 48.61 | 34.56 | Frozen detection head probe, noise_T=5 |
+| onlyseg_sam3_v4 | 35.22 | 25.09 | Frozen detection head probe, noise_T=5 |
 
-The contribution is therefore:
+Interpretation:
 
-- A task-head-free semantic BEV diffusion teacher.
+- BEVDiffuser is favored by the frozen detection head probe because it uses detection-specific GT layout and task-head adaptation.
+- Ours is a task-head-free semantic teacher, so a frozen detection head can under-read the feature.
+- This diagnostic should not be used as the main evidence against or for the proposed teacher formulation.
+
+## 6. Safe Paper Interpretation
+
+The safest conclusion is:
+
+> Ours achieves original BEVDiffuser-level downstream detection transfer while removing GT layout conditioning and Stage 1 task-head supervision from the teacher.
+
+The contribution should be framed as:
+
+- Task-head-free semantic BEV diffusion teacher.
 - Removal of privileged GT layout conditioning.
-- Robust transfer of semantic BEV teacher features through MGD.
-- BEVDiffuser-level downstream detection transfer without relying on detection-specific layout teacher information.
+- Robust semantic teacher transfer through MGD.
+- Task-agnostic semantic conditioning formulation that can be extended beyond 3D detection.
 
-This should be framed as a teacher formulation and transfer robustness contribution, not as a new SOTA detection result.
+Avoid claiming:
+
+- New SOTA 3D detection.
+- Uniform improvement over BEVDiffuser on every metric.
+- Superiority over BEVDiffuser + MGD as the main result.
