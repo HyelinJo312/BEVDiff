@@ -1,0 +1,478 @@
+diff --git a/mmdet3d/__init__.py b/mmdet3d/__init__.py
+index ee89aa55..24d19c9f 100644
+--- a/mmdet3d/__init__.py
++++ b/mmdet3d/__init__.py
+@@ -23,10 +23,10 @@ mmcv_maximum_version = '1.4.0'
+ mmcv_version = digit_version(mmcv.__version__)
+ 
+ 
+-assert (mmcv_version >= digit_version(mmcv_minimum_version)
+-        and mmcv_version <= digit_version(mmcv_maximum_version)), \
+-    f'MMCV=={mmcv.__version__} is used but incompatible. ' \
+-    f'Please install mmcv>={mmcv_minimum_version}, <={mmcv_maximum_version}.'
++#assert (mmcv_version >= digit_version(mmcv_minimum_version)
++#        and mmcv_version <= digit_version(mmcv_maximum_version)), \
++#    f'MMCV=={mmcv.__version__} is used but incompatible. ' \
++#    f'Please install mmcv>={mmcv_minimum_version}, <={mmcv_maximum_version}.'
+ 
+ mmdet_minimum_version = '2.14.0'
+ mmdet_maximum_version = '3.0.0'
+diff --git a/mmdet3d/ops/ball_query/src/ball_query.cpp b/mmdet3d/ops/ball_query/src/ball_query.cpp
+index 6e9d5f75..08efe0a0 100644
+--- a/mmdet3d/ops/ball_query/src/ball_query.cpp
++++ b/mmdet3d/ops/ball_query/src/ball_query.cpp
+@@ -1,7 +1,8 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/ball_query.cpp
+ 
+-#include <THC/THC.h>
++
+ #include <cuda.h>
+ #include <cuda_runtime_api.h>
+ #include <torch/extension.h>
+@@ -9,7 +10,7 @@
+ 
+ #include <vector>
+ 
+-extern THCState *state;
++
+ 
+ #define CHECK_CUDA(x) \
+   TORCH_CHECK(x.type().is_cuda(), #x, " must be a CUDAtensor ")
+diff --git a/mmdet3d/ops/ball_query/src/ball_query_cuda.cu b/mmdet3d/ops/ball_query/src/ball_query_cuda.cu
+index d18e0192..bcfe3c50 100644
+--- a/mmdet3d/ops/ball_query/src/ball_query_cuda.cu
++++ b/mmdet3d/ops/ball_query/src/ball_query_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/ball_query_gpu.cu
+ 
+diff --git a/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample.cpp b/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample.cpp
+index be058902..c4f700dc 100644
+--- a/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample.cpp
++++ b/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample.cpp
+@@ -1,14 +1,15 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/sampling.cpp
+ 
+ #include <ATen/cuda/CUDAContext.h>
+-#include <THC/THC.h>
++
+ #include <torch/extension.h>
+ #include <torch/serialize/tensor.h>
+ 
+ #include <vector>
+ 
+-extern THCState *state;
++
+ 
+ int furthest_point_sampling_wrapper(int b, int n, int m,
+                                     at::Tensor points_tensor,
+diff --git a/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample_cuda.cu b/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample_cuda.cu
+index 6e09709f..c6a256d7 100644
+--- a/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample_cuda.cu
++++ b/mmdet3d/ops/furthest_point_sample/src/furthest_point_sample_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/sampling_gpu.cu
+ 
+diff --git a/mmdet3d/ops/gather_points/src/gather_points.cpp b/mmdet3d/ops/gather_points/src/gather_points.cpp
+index 01a3e404..9f992aa5 100644
+--- a/mmdet3d/ops/gather_points/src/gather_points.cpp
++++ b/mmdet3d/ops/gather_points/src/gather_points.cpp
+@@ -1,11 +1,12 @@
+ #include <ATen/cuda/CUDAContext.h>
+-#include <THC/THC.h>
++#include <ATen/cuda/CUDAContext.h>
++
+ #include <torch/extension.h>
+ #include <torch/serialize/tensor.h>
+ 
+ #include <vector>
+ 
+-extern THCState *state;
++
+ 
+ int gather_points_wrapper(int b, int c, int n, int npoints,
+                           at::Tensor points_tensor, at::Tensor idx_tensor,
+diff --git a/mmdet3d/ops/gather_points/src/gather_points_cuda.cu b/mmdet3d/ops/gather_points/src/gather_points_cuda.cu
+index c93f6436..c815ad92 100644
+--- a/mmdet3d/ops/gather_points/src/gather_points_cuda.cu
++++ b/mmdet3d/ops/gather_points/src/gather_points_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
+diff --git a/mmdet3d/ops/group_points/src/group_points.cpp b/mmdet3d/ops/group_points/src/group_points.cpp
+index 3cd6fc84..ebd0657e 100644
+--- a/mmdet3d/ops/group_points/src/group_points.cpp
++++ b/mmdet3d/ops/group_points/src/group_points.cpp
+@@ -1,7 +1,8 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/group_points.cpp
+ 
+-#include <THC/THC.h>
++
+ #include <cuda.h>
+ #include <cuda_runtime_api.h>
+ #include <torch/extension.h>
+@@ -9,7 +10,7 @@
+ 
+ #include <vector>
+ 
+-extern THCState *state;
++
+ 
+ int group_points_wrapper(int b, int c, int n, int npoints, int nsample,
+                          at::Tensor points_tensor, at::Tensor idx_tensor,
+diff --git a/mmdet3d/ops/group_points/src/group_points_cuda.cu b/mmdet3d/ops/group_points/src/group_points_cuda.cu
+index e94ce378..7afcb461 100644
+--- a/mmdet3d/ops/group_points/src/group_points_cuda.cu
++++ b/mmdet3d/ops/group_points/src/group_points_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/group_points_gpu.cu
+ 
+diff --git a/mmdet3d/ops/interpolate/src/interpolate.cpp b/mmdet3d/ops/interpolate/src/interpolate.cpp
+index 6382579b..22eb558b 100644
+--- a/mmdet3d/ops/interpolate/src/interpolate.cpp
++++ b/mmdet3d/ops/interpolate/src/interpolate.cpp
+@@ -1,7 +1,8 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/interpolate.cpp
+ 
+-#include <THC/THC.h>
++
+ #include <cuda.h>
+ #include <cuda_runtime_api.h>
+ #include <math.h>
+@@ -12,7 +13,7 @@
+ 
+ #include <vector>
+ 
+-extern THCState *state;
++
+ 
+ void three_nn_wrapper(int b, int n, int m, at::Tensor unknown_tensor,
+                       at::Tensor known_tensor, at::Tensor dist2_tensor,
+diff --git a/mmdet3d/ops/interpolate/src/three_interpolate_cuda.cu b/mmdet3d/ops/interpolate/src/three_interpolate_cuda.cu
+index 4789d8ba..89b8ebcf 100644
+--- a/mmdet3d/ops/interpolate/src/three_interpolate_cuda.cu
++++ b/mmdet3d/ops/interpolate/src/three_interpolate_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/interpolate_gpu.cu
+ 
+diff --git a/mmdet3d/ops/interpolate/src/three_nn_cuda.cu b/mmdet3d/ops/interpolate/src/three_nn_cuda.cu
+index 21796fcf..62ca5e0d 100644
+--- a/mmdet3d/ops/interpolate/src/three_nn_cuda.cu
++++ b/mmdet3d/ops/interpolate/src/three_nn_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/Pointnet2.PyTorch/tree/master/pointnet2/src/interpolate_gpu.cu
+ 
+diff --git a/mmdet3d/ops/iou3d/src/iou3d.cpp b/mmdet3d/ops/iou3d/src/iou3d.cpp
+index 25a5cd98..739a0b10 100644
+--- a/mmdet3d/ops/iou3d/src/iou3d.cpp
++++ b/mmdet3d/ops/iou3d/src/iou3d.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/open-mmlab/OpenPCDet/blob/master/pcdet/ops/iou3d_nms/src/iou3d_nms.cpp
+ 
+diff --git a/mmdet3d/ops/iou3d/src/iou3d_kernel.cu b/mmdet3d/ops/iou3d/src/iou3d_kernel.cu
+index 861aea3c..a436e4cf 100644
+--- a/mmdet3d/ops/iou3d/src/iou3d_kernel.cu
++++ b/mmdet3d/ops/iou3d/src/iou3d_kernel.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/open-mmlab/OpenPCDet/blob/master/pcdet/ops/iou3d_nms/src/iou3d_nms_kernel.cu
+ 
+diff --git a/mmdet3d/ops/knn/src/knn.cpp b/mmdet3d/ops/knn/src/knn.cpp
+index 84ddf4b8..7d99a0fe 100644
+--- a/mmdet3d/ops/knn/src/knn.cpp
++++ b/mmdet3d/ops/knn/src/knn.cpp
+@@ -1,12 +1,13 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from https://github.com/CVMI-Lab/PAConv/tree/main/scene_seg/lib/pointops/src/knnquery_heap
+ 
+ #include <torch/serialize/tensor.h>
+ #include <torch/extension.h>
+ #include <vector>
+-#include <THC/THC.h>
++
+ #include <ATen/cuda/CUDAContext.h>
+ 
+-extern THCState *state;
++
+ 
+ #define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x, " must be a CUDAtensor ")
+ #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x, " must be contiguous ")
+diff --git a/mmdet3d/ops/knn/src/knn_cuda.cu b/mmdet3d/ops/knn/src/knn_cuda.cu
+index 1e020ca4..07b4f631 100644
+--- a/mmdet3d/ops/knn/src/knn_cuda.cu
++++ b/mmdet3d/ops/knn/src/knn_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from https://github.com/CVMI-Lab/PAConv/tree/main/scene_seg/lib/pointops/src/knnquery_heap
+ 
+ #include <cmath>
+diff --git a/mmdet3d/ops/paconv/src/assign_score_withk.cpp b/mmdet3d/ops/paconv/src/assign_score_withk.cpp
+index a568d4d0..ad8c74c4 100644
+--- a/mmdet3d/ops/paconv/src/assign_score_withk.cpp
++++ b/mmdet3d/ops/paconv/src/assign_score_withk.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from https://github.com/CVMI-Lab/PAConv/tree/main/scene_seg/lib/paconv_lib/src/gpu
+ 
+ #include <torch/torch.h>
+diff --git a/mmdet3d/ops/paconv/src/assign_score_withk_cuda.cu b/mmdet3d/ops/paconv/src/assign_score_withk_cuda.cu
+index 7ae56f24..9f34a4b0 100644
+--- a/mmdet3d/ops/paconv/src/assign_score_withk_cuda.cu
++++ b/mmdet3d/ops/paconv/src/assign_score_withk_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from https://github.com/CVMI-Lab/PAConv/tree/main/scene_seg/lib/paconv_lib/src/gpu
+ 
+ #include <math.h>
+diff --git a/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cpu.cpp b/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cpu.cpp
+index a26ffb62..db5ce153 100644
+--- a/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cpu.cpp
++++ b/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cpu.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/PCDet/blob/master/pcdet/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu
+ // Written by Shaoshuai Shi
+diff --git a/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cuda.cu b/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cuda.cu
+index 896b316e..ce2b5fbe 100644
+--- a/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cuda.cu
++++ b/mmdet3d/ops/roiaware_pool3d/src/points_in_boxes_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/PCDet/blob/master/pcdet/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu
+ // Written by Shaoshuai Shi
+diff --git a/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d.cpp b/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d.cpp
+index cd743b18..d0dfa596 100644
+--- a/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d.cpp
++++ b/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/PCDet/blob/master/pcdet/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu
+ // Written by Shaoshuai Shi
+diff --git a/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu b/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu
+index 312b35dc..1d3570a5 100644
+--- a/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu
++++ b/mmdet3d/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Modified from
+ // https://github.com/sshaoshuai/PCDet/blob/master/pcdet/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu
+ // Written by Shaoshuai Shi
+diff --git a/mmdet3d/ops/spconv/conv.py b/mmdet3d/ops/spconv/conv.py
+index 6a38f0e6..2c253a7c 100644
+--- a/mmdet3d/ops/spconv/conv.py
++++ b/mmdet3d/ops/spconv/conv.py
+@@ -204,7 +204,7 @@ class SparseConvolution(SparseModule):
+         return out_tensor
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SparseConv2d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -230,7 +230,7 @@ class SparseConv2d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SparseConv3d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -256,7 +256,7 @@ class SparseConv3d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SparseConv4d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -282,7 +282,7 @@ class SparseConv4d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SparseConvTranspose2d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -309,7 +309,7 @@ class SparseConvTranspose2d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SparseConvTranspose3d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -336,7 +336,7 @@ class SparseConvTranspose3d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SparseInverseConv2d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -355,7 +355,7 @@ class SparseInverseConv2d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SparseInverseConv3d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -374,7 +374,7 @@ class SparseInverseConv3d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SubMConv2d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -401,7 +401,7 @@ class SubMConv2d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SubMConv3d(SparseConvolution):
+ 
+     def __init__(self,
+@@ -428,7 +428,7 @@ class SubMConv3d(SparseConvolution):
+             indice_key=indice_key)
+ 
+ 
+-@CONV_LAYERS.register_module()
++@CONV_LAYERS.register_module(force=True)
+ class SubMConv4d(SparseConvolution):
+ 
+     def __init__(self,
+diff --git a/mmdet3d/ops/spconv/src/indice_cuda.cu b/mmdet3d/ops/spconv/src/indice_cuda.cu
+index b67cca0c..b1ab6a51 100644
+--- a/mmdet3d/ops/spconv/src/indice_cuda.cu
++++ b/mmdet3d/ops/spconv/src/indice_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Copyright 2019 Yan Yan
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+diff --git a/mmdet3d/ops/spconv/src/maxpool_cuda.cu b/mmdet3d/ops/spconv/src/maxpool_cuda.cu
+index 22eb0bf2..8f655237 100644
+--- a/mmdet3d/ops/spconv/src/maxpool_cuda.cu
++++ b/mmdet3d/ops/spconv/src/maxpool_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Copyright 2019 Yan Yan
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+diff --git a/mmdet3d/ops/spconv/src/reordering_cuda.cu b/mmdet3d/ops/spconv/src/reordering_cuda.cu
+index c29824d8..d29f3731 100644
+--- a/mmdet3d/ops/spconv/src/reordering_cuda.cu
++++ b/mmdet3d/ops/spconv/src/reordering_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ // Copyright 2019 Yan Yan
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+diff --git a/mmdet3d/ops/voxel/src/scatter_points_cpu.cpp b/mmdet3d/ops/voxel/src/scatter_points_cpu.cpp
+index c22b8aed..d0553f60 100644
+--- a/mmdet3d/ops/voxel/src/scatter_points_cpu.cpp
++++ b/mmdet3d/ops/voxel/src/scatter_points_cpu.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ #include <ATen/TensorUtils.h>
+ #include <torch/extension.h>
+ // #include "voxelization.h"
+diff --git a/mmdet3d/ops/voxel/src/scatter_points_cuda.cu b/mmdet3d/ops/voxel/src/scatter_points_cuda.cu
+index 2ed18690..e316cb1f 100644
+--- a/mmdet3d/ops/voxel/src/scatter_points_cuda.cu
++++ b/mmdet3d/ops/voxel/src/scatter_points_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ #include <ATen/ATen.h>
+ #include <ATen/cuda/CUDAContext.h>
+ #include <torch/types.h>
+diff --git a/mmdet3d/ops/voxel/src/voxelization.cpp b/mmdet3d/ops/voxel/src/voxelization.cpp
+index f83348e3..860752dd 100644
+--- a/mmdet3d/ops/voxel/src/voxelization.cpp
++++ b/mmdet3d/ops/voxel/src/voxelization.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ #include <torch/extension.h>
+ #include "voxelization.h"
+ 
+diff --git a/mmdet3d/ops/voxel/src/voxelization_cpu.cpp b/mmdet3d/ops/voxel/src/voxelization_cpu.cpp
+index 6bcec401..ee4728bc 100644
+--- a/mmdet3d/ops/voxel/src/voxelization_cpu.cpp
++++ b/mmdet3d/ops/voxel/src/voxelization_cpu.cpp
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ #include <ATen/TensorUtils.h>
+ #include <torch/extension.h>
+ // #include "voxelization.h"
+diff --git a/mmdet3d/ops/voxel/src/voxelization_cuda.cu b/mmdet3d/ops/voxel/src/voxelization_cuda.cu
+index b4edcf3b..49acfa6d 100644
+--- a/mmdet3d/ops/voxel/src/voxelization_cuda.cu
++++ b/mmdet3d/ops/voxel/src/voxelization_cuda.cu
+@@ -1,3 +1,4 @@
++#include <ATen/cuda/CUDAContext.h>
+ #include <ATen/ATen.h>
+ #include <ATen/cuda/CUDAContext.h>
+ #include <c10/cuda/CUDAGuard.h>
+diff --git a/requirements/runtime.txt b/requirements/runtime.txt
+index f0e7ae42..9df5c825 100644
+--- a/requirements/runtime.txt
++++ b/requirements/runtime.txt
+@@ -1,8 +1,8 @@
+ lyft_dataset_sdk
+ networkx>=2.2,<2.3
+ # we may unlock the verion of numba in the future
+-numba==0.48.0
+-numpy<1.20.0
++numba
++numpy
+ nuscenes-devkit
+ plyfile
+ scikit-image
+diff --git a/setup.py b/setup.py
+index 28ec46cf..de3453e2 100644
+--- a/setup.py
++++ b/setup.py
+@@ -241,7 +241,7 @@ if __name__ == '__main__':
+                     'src/maxpool.cc',
+                     'src/maxpool_cuda.cu',
+                 ],
+-                extra_args=['-w', '-std=c++14']),
++                extra_args=['-w', '-std=c++17']),
+             make_cuda_ext(
+                 name='iou3d_cuda',
+                 module='mmdet3d.ops.iou3d',
