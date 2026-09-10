@@ -179,3 +179,4 @@ events.out.tfevents.*
 
 # ===== Experiment output artifacts (plots, etc.) =====
 BEVFormer/tools/*.pdf
+.omc/
