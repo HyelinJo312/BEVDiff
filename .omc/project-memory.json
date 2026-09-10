@@ -1,0 +1,116 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1788288319051,
+  "projectRoot": "/home/user/data/hyelin/BEVDiff",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "BEVFormer": {
+      "path": "BEVFormer",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1788288319048,
+      "keyFiles": []
+    },
+    "ICLR_2027_paper": {
+      "path": "ICLR_2027_paper",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1788288319048,
+      "keyFiles": [
+        "extended_outline",
+        "full_paper.tex",
+        "reference.bib"
+      ]
+    },
+    "TPVFormer": {
+      "path": "TPVFormer",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1788288319049,
+      "keyFiles": []
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 2,
+      "lastAccessed": 1788288319049,
+      "keyFiles": [
+        "README.md",
+        "index.html"
+      ]
+    },
+    "mmdetection3d": {
+      "path": "mmdetection3d",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1788288319051,
+      "keyFiles": []
+    },
+    "BEVFormer/docs": {
+      "path": "BEVFormer/docs",
+      "purpose": "Documentation",
+      "fileCount": 4,
+      "lastAccessed": 1788288319051,
+      "keyFiles": [
+        "can_bus.ipynb",
+        "getting_started.md",
+        "install.md"
+      ]
+    },
+    "docs/static": {
+      "path": "docs/static",
+      "purpose": "Static files",
+      "fileCount": 0,
+      "lastAccessed": 1788288319051,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "BEVFormer/projects/bevdiffuser/train_only_seg.sh",
+      "accessCount": 2,
+      "lastAccessed": 1788290096320,
+      "type": "file"
+    },
+    {
+      "path": "jhl-bevdiff-pro6000_env_upgrade.md",
+      "accessCount": 1,
+      "lastAccessed": 1788288553529,
+      "type": "file"
+    },
+    {
+      "path": "jhl-bevdiff-pro6000_env_asbuilt.md",
+      "accessCount": 1,
+      "lastAccessed": 1788290159642,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

@@ -10,11 +10,13 @@ export NUMEXPR_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1     # prevent OpenBLAS from spawning extra threads
 export OPENCV_FOR_THREADS_NUM=1   # 1=단일 스레드 유지 (스레드 폭발로 인한 극심한 지연 방지)
 export MAX_JOBS=16                 # parallel build jobs (half server)
-export TCNN_CUDA_ARCHITECTURES=86 # Ampere (A6000)
+export TCNN_CUDA_ARCHITECTURES=120 # Blackwell (RTX PRO 6000, sm_120)
 
 # ── NCCL / inter-GPU communication ──────────────────────────────────────────
-# export NCCL_IB_DISABLE=1          # no InfiniBand on this server
-# export NCCL_P2P_DISABLE=0         # enable PCIe/NVLink P2P between GPUs
+export NCCL_IB_DISABLE=1          # no InfiniBand on this server
+# `nvidia-smi topo -p2p n` reports NS (Not Supported) for every GPU pair on
+# this host, so NCCL deadlocks during init unless P2P is turned off.
+export NCCL_P2P_DISABLE=1
 
 
 GPUS=4

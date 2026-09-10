@@ -1,0 +1,6 @@
+[submodule "mmdetection3d"]
+	path = mmdetection3d
+	url = https://github.com/open-mmlab/mmdetection3d.git
+[submodule "TPVFormer"]
+	path = TPVFormer
+	url = https://github.com/wzzheng/TPVFormer.git
