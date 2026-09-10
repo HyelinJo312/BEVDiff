@@ -12,6 +12,7 @@ https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_
 '''
 
 import argparse
+import json
 import logging
 import math
 import os, sys
@@ -71,6 +72,8 @@ def train():
     bev_cfg = Config.fromfile(args.bev_config)
     if args.cfg_options is not None:
         bev_cfg.merge_from_dict(args.cfg_options)
+    from projects.bevdiffuser.semantic_bev_cache import validate_cache_config
+    validate_cache_config(bev_cfg)
     
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
@@ -262,6 +265,8 @@ def train():
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:   
         tracker_config = dict(vars(args))
+        if args.report_to == 'tensorboard' and isinstance(tracker_config.get('cfg_options'), dict):
+            tracker_config['cfg_options'] = json.dumps(tracker_config['cfg_options'], sort_keys=True)
 
         if args.resume_from_checkpoint:
             resume_ckpt_number = args.resume_from_checkpoint.split("-")[-1]
@@ -299,6 +304,10 @@ def train():
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Is SD21: {is_training_sd21}")
+    if hasattr(train_dataset, 'use_semantic_bev_cache'):
+        condition_source = (str(train_dataset.semantic_bev_cache.root)
+                            if train_dataset.use_semantic_bev_cache else 'live SAM3/Metric3D')
+        logger.info(f"  Semantic BEV condition source: {condition_source}")
     logger.info(f'[UNet] BFDNResBlock count: {num_fdn}')
 
     global_step = 0
@@ -387,12 +396,18 @@ def train():
                 if 'depth_maps' in batch.keys():
                     depth_maps = torch.stack(batch['depth_maps'].data[0], dim=0)
 
-                # Segmentation maps [B, V, H, W] — present only when use_semantics=True
-                seg_maps = torch.stack(batch['seg_maps'].data[0], dim=0)
-                seg_cond = get_segmaps_cond(seg_maps)
+                condition_kwargs = {}
+                if 'semantic_bev_probabilities' in batch:
+                    probabilities = torch.stack(batch['semantic_bev_probabilities'].data[0], dim=0)
+                    condition_kwargs['semantic_probabilities'] = get_segmaps_cond(probabilities)
+                    seg_cond = None
+                else:
+                    seg_maps = torch.stack(batch['seg_maps'].data[0], dim=0)
+                    seg_cond = get_segmaps_cond(seg_maps)
 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_latents, timesteps, img_metas, seg_cond, depth_maps=depth_maps)
+                model_pred = unet(noisy_latents, timesteps, img_metas, seg_cond,
+                                  depth_maps=depth_maps, **condition_kwargs)
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -781,4 +796,3 @@ def parse_args():
 
 if __name__ == "__main__":
     train()
-

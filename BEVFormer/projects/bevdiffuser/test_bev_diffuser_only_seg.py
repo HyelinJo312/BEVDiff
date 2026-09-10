@@ -152,6 +152,8 @@ def test():
     args = parse_args()
 
     bev_cfg = Config.fromfile(args.bev_config)
+    from projects.bevdiffuser.semantic_bev_cache import validate_cache_config
+    validate_cache_config(bev_cfg)
 
     # set random seeds
     if args.seed is not None:
@@ -274,16 +276,25 @@ def evaluate(unet,
 
         if denoise_timesteps > 0:
             # # DDIM
-            seg_cond = torch.stack(batch['seg_maps'].data[0], dim=0).to(latents.device)
-            seg_uncond = get_segmaps_uncond(seg_cond)
+            cond_kwargs, uncond_kwargs = {}, {}
+            if 'semantic_bev_probabilities' in batch:
+                probabilities = torch.stack(batch['semantic_bev_probabilities'].data[0], dim=0).to(latents.device)
+                cond_kwargs['semantic_probabilities'] = probabilities
+                uncond_kwargs['semantic_probabilities'] = torch.zeros_like(probabilities)
+                seg_cond = seg_uncond = None
+            else:
+                seg_cond = torch.stack(batch['seg_maps'].data[0], dim=0).to(latents.device)
+                seg_uncond = get_segmaps_uncond(seg_cond)
 
             noise_scheduler.config.num_train_timesteps=denoise_timesteps
             noise_scheduler.set_timesteps(num_inference_steps=num_inference_steps)
 
             for _, t in enumerate(noise_scheduler.timesteps): # 5 -> 4 -> 3 -> 2 -> 1
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                noise_pred_uncond = unet(latents, t_batch, img_metas, seg_uncond, depth_maps=depth_maps)
-                noise_pred_cond = unet(latents, t_batch, img_metas, seg_cond, depth_maps=depth_maps)
+                noise_pred_uncond = unet(latents, t_batch, img_metas, seg_uncond,
+                                         depth_maps=depth_maps, **uncond_kwargs)
+                noise_pred_cond = unet(latents, t_batch, img_metas, seg_cond,
+                                       depth_maps=depth_maps, **cond_kwargs)
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]

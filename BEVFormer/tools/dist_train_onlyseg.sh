@@ -13,9 +13,9 @@ GPUS=4
 PORT=${PORT:-28508}
 
 CONFIG="./projects/configs/diff_bevformer/bev_tiny_onlyseg_sam_v2_da3.py"
-UNET_CHECKPOINT_DIR="../results/version2/stage1/BEVDiffuser_tiny_onlyseg_sam3_v5/checkpoint-50000"
+UNET_CHECKPOINT_DIR="../results/version2/stage1/BEVDiffuser_tiny_onlyseg_sam3_v6/checkpoint-50000"
 LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
-RUN_NAME="DiffBEVFormer_tiny_onlyseg_sam_mgd_v10_t100_alpha100_lambda_0.5"
+RUN_NAME="DiffBEVFormer_tiny_onlyseg_sam_mgd_v12_t100_alpha100_lambda_0.55"
 WORK_DIR="../results/version2/stage2"
 
 # RESUME_FROM="../results/version2/stage2/DiffBEVFormer_tiny_onlyseg_sam_da3_no-mgd/epoch_18.pth"

@@ -13,11 +13,6 @@ Improve Self-attention layers
 
 - remove attn2 (redundant cross-attention) from BasicTransformerBlock
 
-
-[Ablation Study]
-
-Without SBAM: Semantic BEV Prior with Input Concat
-
 '''
 
 from abc import abstractmethod
@@ -50,8 +45,7 @@ from projects.bevdiffuser.ldm.modules.diffusionmodules.util import checkpoint
 from mmcv.runner import force_fp32, auto_fp16
 from mmcv.utils import TORCH_VERSION, digit_version
 from .multiscale_fusion import *
-from .seg_bev_aligner_one_hot_da3_ablation import SegBEVAligner
-# from .seg_bev_aligner_one_hot_v4 import SegBEVAligner
+from .seg_bev_aligner_one_hot_v5 import SegBEVAligner
 
 
 def convert_module_to_f16(l):
@@ -349,7 +343,7 @@ class ResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
-class FDN(nn.Module):
+class SBAM(nn.Module):
     def __init__(self, norm_channels, cond_channels):
         super().__init__()
         self.param_free_norm = normalization(norm_channels)
@@ -387,8 +381,8 @@ class SBAMResBlock(TimestepBlock):
         self.use_conv = use_conv
         self.use_checkpoint = use_checkpoint
 
-        self.norm_0 = FDN(channels, seg_channels)
-        self.norm_1 = FDN(self.out_channels, seg_channels)
+        self.norm_0 = SBAM(channels, seg_channels)
+        self.norm_1 = SBAM(self.out_channels, seg_channels)
 
         self.updown = up or down
 
@@ -455,11 +449,33 @@ class DiffusionUNetModel(nn.Module):
     Seg-only conditional UNet.
 
     Conditioning:
-      - Semantic BEV (Grounded-SAM seg map -> SegBEVAligner) is injected once
-        at the UNet input by channel concatenation.
+      - Semantic BEV (Grounded-SAM seg map -> SegBEVAligner) injected via SBAM
+        in EVERY decoder block (SBAMResBlock).
       - No DINO / layout condition. Attention blocks are `SelfAttnTransformer`,
         i.e. pure self-attention with the redundant cross-attention branch removed.
 
+    :param in_channels: channels in the input Tensor.
+    :param model_channels: base channel count for the model.
+    :param out_channels: channels in the output Tensor.
+    :param num_res_blocks: number of residual blocks per downsample.
+    :param attention_ds: a collection of downsample rates at which
+        attention will take place. May be a set, list, or tuple.
+        For example, if this contains 4, then at 4x downsampling, attention
+        will be used.
+    :param dropout: the dropout probability.
+    :param channel_mult: channel multiplier for each level of the UNet.
+    :param conv_resample: if True, use learned convolutions for upsampling and
+        downsampling.
+    :param dims: determines if the signal is 1D, 2D, or 3D.
+
+    :param use_checkpoint: use gradient checkpointing to reduce memory usage.
+    :param num_heads: the number of attention heads in each attention layer.
+    :param num_heads_channels: if specified, ignore num_heads and instead use
+                               a fixed channel width per attention head.
+    :param num_heads_upsample: works with num_heads to set a different number
+                               of heads for upsampling. Deprecated.
+    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
+    :param resblock_updown: use residual blocks for up/downsampling.
     """
 
     def __init__(
@@ -544,12 +560,11 @@ class DiffusionUNetModel(nn.Module):
 
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
-            [TimestepEmbedSequential(conv_nd(dims, in_channels + seg_channels[0], ch, 3, padding=1))]
+            [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
         )
         self._feature_size = ch
         input_block_chans = [ch]
         ds = 1
-        print('No SBAM in decoder, simple concat and only self-attention')
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
@@ -647,17 +662,30 @@ class DiffusionUNetModel(nn.Module):
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
-                layers = [
-                    ResBlock(
-                        ch + ich,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=int(model_channels * mult),
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
+                if i == 0 or i == 2:  
+                    layers = [
+                        SBAMResBlock(
+                            ch + ich,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(model_channels * mult),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            seg_channels=seg_channels[level],
+                        )
+                    ]
+                else:
+                    layers = [
+                        ResBlock(
+                            ch + ich,
+                            time_embed_dim,
+                            dropout,
+                            out_channels=int(model_channels * mult),
+                            dims=dims,
+                            use_checkpoint=use_checkpoint,
+                            use_scale_shift_norm=use_scale_shift_norm,
+                        )
+                    ]
                 ch = int(model_channels * mult)
                 if ds in attention_ds:
                     print('decoder attention layer: ds = {}, resolution = {}'.format(ds, self.image_size // ds))
@@ -696,7 +724,7 @@ class DiffusionUNetModel(nn.Module):
                     )
                     ds //= 2
                 block = TimestepEmbedSequential(*layers)
-                block.ctx_ds = ctx_ds  # use pre-upsample ds so FDN gets the matching seg BEV scale
+                block.ctx_ds = ctx_ds  # use pre-upsample ds so SBAM gets the matching seg BEV scale
                 self.output_blocks.append(block)
                 self._feature_size += ch
 
@@ -717,35 +745,35 @@ class DiffusionUNetModel(nn.Module):
 
     def enable_gradient_checkpointing(self):
         for m in self.modules():
-            if isinstance(m, (ResBlock, SBAMResBlock, SelfAttnBlock)):
+            if isinstance(m, SBAMResBlock):
                 m.use_checkpoint = True
 
-    def encode_seg(self, seg_cond, img_metas, depth_maps=None):
+    def encode_seg(self, seg_cond, img_metas, depth_maps=None, semantic_probabilities=None):
         """
         Project the multi-view seg map to multi-scale semantic BEV maps.
 
         """
-        return self.seg_aligner(seg_cond, img_metas, depth_maps=depth_maps)
+        return self.seg_aligner(seg_cond, img_metas, depth_maps=depth_maps,
+                                semantic_probabilities=semantic_probabilities)
     
 
-    def forward(self, x, timesteps, img_metas, seg_cond, depth_maps=None, seg_bev_maps=None):
+    def forward(self, x, timesteps, img_metas, seg_cond=None, depth_maps=None, seg_bev_maps=None,
+                semantic_probabilities=None):
         hs = []
 
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
         # Semantic BEV maps
+        if seg_bev_maps is not None and semantic_probabilities is not None:
+            raise ValueError('Choose encoded BEV maps or raw cached probabilities, not both')
         if seg_bev_maps is None:
-            seg_bev_maps = self.encode_seg(seg_cond, img_metas, depth_maps=depth_maps)
+            seg_bev_maps = self.encode_seg(seg_cond, img_metas, depth_maps=depth_maps,
+                                           semantic_probabilities=semantic_probabilities)
 
         h = x.type(self.dtype)  # h: (B, C, H, W)
 
         for module in self.downsample_blocks:
             h = module(h)
-
-        seg_bev = seg_bev_maps[1].type(h.dtype)
-        if seg_bev.shape[-2:] != h.shape[-2:]:
-            seg_bev = F.interpolate(seg_bev, size=h.shape[-2:], mode="nearest")
-        h = th.cat([h, seg_bev], dim=1)
 
         # Encoder (self-attention only, no external condition)
         for module in self.input_blocks:
@@ -755,10 +783,11 @@ class DiffusionUNetModel(nn.Module):
         # Middle block
         h = self.middle_block(h, emb)
 
-        # Decoder (no SB-FDN here; semantic condition was injected once at input)
+        # Decoder (SBAM semantic BEV conditioning in every block)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb)
+            seg_bev = self._select_ctx(seg_bev_maps, module)
+            h = module(h, emb, seg_bev)
 
         h = h.type(x.dtype)
         h = self.out(h)

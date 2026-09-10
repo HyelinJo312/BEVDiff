@@ -10,7 +10,7 @@ from mmdet3d.core.bbox import LiDARInstance3DBoxes
 from mmcv.parallel import DataContainer as DC
 from projects.mmdet3d_plugin.datasets.nuscenes_dataset import CustomNuScenesDataset
 from projects.mmdet3d_plugin.datasets.nuscenes_dataset_v2 import CustomNuScenesDatasetV2
-
+import cv2
 
 def get_content_shapes(img_metas):
     """Per-camera (H, W, C) of the real image content inside the padded frame.
@@ -672,6 +672,165 @@ class CustomNuScenesDiffusionDataset_seg_depth(CustomNuScenesDataset):
 
 
            
+@DATASETS.register_module()
+class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDiffusionDataset_seg_depth):
+    """SAM3 + raw Metric3D maps in the actual augmented image coordinates.
+
+    Stores the original projection in metadata and recovers the image-plane
+    transform from the pipeline's updated lidar2img. This includes resize,
+    crop and flip when those transforms update the calibration, as required
+    by BEVFormer. Padding is applied separately; photometric transforms never
+    touch semantic IDs or metric depth. Outputs keep the v1 DataContainer API.
+    """
+
+    def __init__(self, *args, depth_raw_shape=(900, 1600),
+                 depth_range=(2.5, 170.0), opencv_num_threads=1,
+                 use_semantic_bev_cache=False, semantic_bev_cache_root=None,
+                 semantic_bev_cache_projection=None, semantic_bev_cache_source_version=None,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        if int(opencv_num_threads) != opencv_num_threads or opencv_num_threads < 1:
+            raise ValueError('opencv_num_threads must be a positive integer')
+        self.opencv_num_threads = int(opencv_num_threads)
+        if len(depth_raw_shape) != 2 or min(depth_raw_shape) <= 0:
+            raise ValueError('depth_raw_shape must be a positive (H, W) pair')
+        if len(depth_range) != 2 or not 0 < depth_range[0] < depth_range[1]:
+            raise ValueError('depth_range must contain positive increasing meter bounds')
+        self.depth_raw_shape = tuple(depth_raw_shape)
+        self.depth_range = tuple(depth_range)
+        if self.use_depth and self.depth_path is None:
+            raise ValueError('Metric3D depth_path is required when use_depth=True')
+        if self.use_semantics and self.semantic_path is None:
+            raise ValueError('semantic_path is required when use_semantics=True')
+        if not self._retain_raw_projection(self.pipeline):
+            raise ValueError('Metric3D dataset requires CustomCollect3D in its pipeline')
+        
+        self.use_semantic_bev_cache = use_semantic_bev_cache
+        self.semantic_bev_cache = None
+        if use_semantic_bev_cache:
+            from .semantic_bev_cache import SemanticBEVCache, cache_contract
+            if not self.use_semantics or semantic_bev_cache_root is None or semantic_bev_cache_projection is None:
+                raise ValueError('Cache mode requires semantics, a cache root and projection settings')
+            contract = cache_contract(semantic_bev_cache_projection, self.depth_raw_shape,
+                                      self.depth_range, self.seg_id_remap, semantic_bev_cache_source_version)
+            self.semantic_bev_cache = SemanticBEVCache(semantic_bev_cache_root, contract,
+                required_tokens=[info['token'] for info in self.data_infos])
+
+    @classmethod
+    def _retain_raw_projection(cls, transform):
+        if type(transform).__name__ == 'CustomCollect3D':
+            transform.meta_keys = tuple(transform.meta_keys) + ('metric3d_lidar2img_raw',)
+            return 1
+        children = getattr(transform, 'transforms', ())
+        if isinstance(children, (list, tuple)):
+            return sum(cls._retain_raw_projection(child) for child in children)
+        return cls._retain_raw_projection(children)
+
+    def get_data_info(self, index):
+        info = super().get_data_info(index)
+        if info is not None and 'lidar2img' in info:
+            info['metric3d_lidar2img_raw'] = [matrix.copy() for matrix in info['lidar2img']]
+        return info
+
+    @staticmethod
+    def _current_metas(raw):
+        while isinstance(raw, DC):
+            raw = raw.data
+        if isinstance(raw, dict) and 'filename' in raw:
+            return raw
+        if isinstance(raw, dict):
+            return CustomNuScenesDiffusionDataset_seg_depth_v2._current_metas(raw[max(raw)])
+        if isinstance(raw, (list, tuple)) and len(raw) == 1:
+            return CustomNuScenesDiffusionDataset_seg_depth_v2._current_metas(raw[0])
+        raise ValueError('Expected temporal training metadata or one test augmentation')
+
+    def __getitem__(self, idx):
+        # Bypass the DA3 __getitem__: its loaders use a different depth frame.
+        # OPENCV_NUM_THREADS is not honored by all OpenCV builds; configure each worker.
+        if cv2.getNumThreads() != self.opencv_num_threads:
+            cv2.setNumThreads(self.opencv_num_threads)
+        data = CustomNuScenesDataset.__getitem__(self, idx)
+        metas = self._current_metas(data['img_metas'])
+        if self.use_semantic_bev_cache:
+            probabilities = self.semantic_bev_cache.load(metas['sample_idx'], metas)
+            data['semantic_bev_probabilities'] = DC(torch.from_numpy(probabilities))
+            return data
+        if self.use_semantics:
+            data['seg_maps'] = DC(self.load_segmaps(metas['filename'], metas, self.semantic_path))
+        if self.use_depth:
+            data['depth_maps'] = DC(self.load_depth_from_filenames(metas['filename'], metas))
+        return data
+
+    @staticmethod
+    def _map_path(root, filename, suffix):
+        rel = filename.split('samples/')[-1]
+        return os.path.join(root, 'samples', os.path.splitext(rel)[0] + suffix)
+
+    def _align_map(self, array, img_metas, view, fill_value):
+        if array.shape != self.depth_raw_shape:
+            raise ValueError(f'Expected raw map shape {self.depth_raw_shape}, got {array.shape}')
+        if 'metric3d_lidar2img_raw' not in img_metas:
+            raise ValueError('Missing raw calibration; use the Metric3D v2 dataset pipeline')
+        original = np.asarray(img_metas['metric3d_lidar2img_raw'][view], dtype=np.float64)
+        augmented = np.asarray(img_metas['lidar2img'][view], dtype=np.float64)
+        transform = augmented @ np.linalg.inv(original)
+        # Image augmentation must preserve camera-Z and homogeneous scale.
+        if (not np.isfinite(transform).all()
+                or not np.allclose(transform[2:], np.eye(4)[2:], atol=1e-5)
+                or not np.allclose(transform[:2, 3], 0, atol=1e-5)):
+            raise ValueError('Expected image-plane augmentation, not a 3D frame change')
+        content_h, content_w = get_content_shapes(img_metas)[view][:2]
+        pad_h, pad_w = img_metas['pad_shape'][view][:2]
+        if content_h > pad_h or content_w > pad_w:
+            raise ValueError('Image content exceeds padded frame')
+        aligned = cv2.warpPerspective(
+            np.asarray(array, dtype=np.float32), transform[:3, :3],
+            (int(content_w), int(content_h)), flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=float(fill_value))
+        return np.pad(aligned, ((0, pad_h - content_h), (0, pad_w - content_w)),
+                      mode='constant', constant_values=fill_value)
+
+    def load_segmaps(self, filenames, img_metas, semantic_root):
+        maps = []
+        for view, filename in enumerate(filenames):
+            path = self._map_path(semantic_root, filename, '_mask.bin')
+            raw = np.fromfile(path, dtype=np.int8)
+            if raw.size != int(np.prod(self.depth_raw_shape)):
+                raise ValueError(f'Invalid SAM3 map size at {path}: {raw.size}')
+            raw = raw.reshape(self.depth_raw_shape).astype(np.int16)
+            remapped = raw.copy()
+            for source, target in (self.seg_id_remap or {}).items():
+                remapped[raw == source] = target
+            aligned = self._align_map(remapped, img_metas, view, -1)
+            maps.append(torch.from_numpy(aligned.astype(np.int64)))
+        return torch.stack(maps)
+
+    def load_depth_from_filenames(self, filenames, img_metas=None):
+        """Load float depth; invalid/out-of-range values become 0, never clipped.
+
+        Without metadata, return raw [V, 900, 1600] maps for inspection.
+        __getitem__ always supplies metadata and returns padded image size.
+        Missing or malformed files raise, avoiding silent empty conditioning.
+        """
+        maps = []
+        for view, filename in enumerate(filenames):
+            path = self._map_path(self.depth_path, filename, '.npy')
+            if not os.path.isfile(path):
+                # Metric3D exports may omit the DA3-style 'samples' directory.
+                relative = os.path.splitext(filename.split('samples/')[-1])[0] + '.npy'
+                path = os.path.join(self.depth_path, relative)
+            raw = np.load(path, allow_pickle=False)
+            if raw.shape != self.depth_raw_shape or not np.issubdtype(raw.dtype, np.floating):
+                raise ValueError(f'Expected floating {self.depth_raw_shape} depth at {path}, '
+                                 f'got {raw.shape} {raw.dtype}')
+            valid = np.isfinite(raw) & (raw >= self.depth_range[0]) & (raw <= self.depth_range[1])
+            depth = np.where(valid, raw, 0).astype(np.float32)
+            if img_metas is not None:
+                depth = self._align_map(depth, img_metas, view, 0)
+            maps.append(torch.from_numpy(depth))
+        return torch.stack(maps)
+
+
 @DATASETS.register_module()
 class CustomNuScenesDiffusionDataset_layout_seg_v1(CustomNuScenesDataset): 
     def __init__(self, pc_range, use_3d_bbox=True, num_classes=18, num_bboxes=300, use_layout=True, use_semantics=True, use_depth=False,

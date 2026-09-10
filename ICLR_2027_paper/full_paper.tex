@@ -49,11 +49,22 @@ Daejeon, South Korea \\
 \maketitle
 
 \begin{abstract}
-The abstract paragraph should be indented 1/2~inch (3~picas) on both left and
-right-hand margins. Use 10~point type, with a vertical spacing of 11~points.
-The word \textsc{Abstract} must be centered, in small caps, and in point size 12. Two
-line spaces precede the abstract. The abstract must be limited to one
-paragraph.
+Bird's-eye-view (BEV) representations are central to camera-based autonomous
+driving perception, yet they are typically learned only through downstream task
+supervision. Recent BEV diffusion methods provide feature-level denoising
+objectives, but often rely on task-specific annotations or conditioning signals,
+which limits their applicability across perception tasks. We propose a
+semantic-guided diffusion framework for BEV representation learning that uses
+dense semantic priors instead of task-specific conditioning. Multi-view semantic
+masks extracted from a frozen vision foundation model are projected into the BEV
+space to construct a spatially aligned semantic BEV prior. This prior guides BEV
+feature denoising through Semantic BEV Adaptive Modulation (SBAM), enabling
+generative diffusion pre-training without downstream task supervision. The
+pre-trained diffusion model is then used to provide feature-level supervision
+for BEV perception models through masked generative distillation. At inference
+time, both the diffusion model and semantic branch are removed. The proposed
+framework achieves competitive performance against task-specific diffusion
+approaches without additional inference cost.
 \end{abstract}
 
 %% Please note that we have introduced automatic line number generation
@@ -82,38 +93,40 @@ explicit feature-level training signal for recovering spatially structured
 representations.
 
 Despite their potential, existing BEV diffusion methods often rely on
-task-specific priors or ground-truth annotations for
-conditioning~\citep{BEVDiff,LaneDiff}. In particular, BEVDiffuser constructs a
-ground-truth object layout from object categories and 3D bounding boxes and
-employs a conditioning mechanism specialized for this layout~\citep{BEVDiff}.
-Although such conditioning provides strong task-aligned guidance, it introduces
-additional annotation requirements and couples the diffusion model to 3D object
-detection. Adapting the model to another downstream task may therefore require
-redesigning both the conditioning signal and its injection mechanism.
+task-specific priors or ground-truth information for
+conditioning~\citep{BEVDiff,LaneDiff}. For example, BEVDiffuser constructs a
+ground-truth object layout from object categories and 3D bounding
+boxes~\citep{BEVDiff}, whereas LaneDiffusion uses lane centerline
+priors~\citep{LaneDiff}; both employ conditioning mechanisms tailored to their
+respective representations. Although such conditioning provides effective
+guidance, it requires task-specific annotations and ties the diffusion model to
+particular perception tasks. As a result, adapting these models to other tasks
+may involve redesigning both the conditioning signal and its injection
+mechanism.
 
-Task dependency also arises from the training objective. Existing BEV diffusion
+Task dependency also appears in the training objective. Existing BEV diffusion
 methods commonly optimize the diffusion model together with downstream task
 losses~\citep{BEVDiff,DiffBEV,DifFUSER,DiffVecMap}, directly coupling diffusion
-training to task-specific prediction heads and supervision. Although
+training to specialized prediction heads and supervision. Although
 BEVDiffuser~\citep{BEVDiff} removes its diffusion module at inference time, its
 diffusion training still relies on a 3D detection objective. Extending these
-approaches to a new task may therefore require modifying the prediction head and
-training objectives, limiting the transferability of diffusion-based BEV
-refinement across downstream tasks.
+approaches to another perception task may therefore require modifying the
+prediction head and training objectives, limiting the applicability of
+diffusion-based BEV representation learning.
 
-To address these limitations, we propose a task-agnostic semantic-guided
-diffusion framework for BEV representation learning, as illustrated in
-Figure~\ref{fig:overview}. Here, task-agnostic means that diffusion training
-does not require task-specific annotations or downstream task supervision. A
-frozen vision foundation model~\citep{SAM3} extracts multi-view semantic masks,
-which are projected into the BEV space to construct a spatially aligned dense
-semantic BEV prior. This prior captures both dynamic agents and static scene
-elements and guides denoising through Semantic BEV Adaptive Modulation (SBAM).
-We first pre-train the diffusion model using only a generative denoising
-objective and then freeze it as a teacher. The denoised BEV representations are
-subsequently transferred to a student BEV model through masked generative
-distillation~\citep{MGD}. At inference time, the diffusion teacher and semantic 
-branch are removed, introducing no additional inference cost.
+In this work, we propose a task-agnostic semantic-guided diffusion framework for
+BEV representation learning, as illustrated in Figure~\ref{fig:overview}. The
+framework is task-agnostic in both its conditioning design and training
+objective, avoiding task-specific annotations and downstream task supervision
+during diffusion pre-training. A frozen vision foundation model~\citep{SAM3}
+extracts multi-view semantic masks, which are projected into the BEV space to
+construct a spatially aligned dense semantic BEV prior. This prior captures both
+dynamic agents and static scene elements and guides denoising through Semantic
+BEV Adaptive Modulation (SBAM). After pre-training, the diffusion model is
+frozen, and its denoised BEV representations are transferred to BEV perception
+models through masked generative distillation~\citep{MGD}. At inference time,
+the diffusion model and semantic branch are removed, introducing no additional
+inference cost.
 
 
 Our main contributions are as follows:
@@ -128,11 +141,10 @@ Our main contributions are as follows:
     enables the BEV diffusion model to learn structured representations without
     relying on task-specific supervision.
     
-    \item Building on the plug-and-play paradigm of BEVDiffuser, we introduce
-    masked generative BEV distillation to transfer semantic-guided denoised
-    representations to a student model, achieving competitive performance
-    against task-specific diffusion approaches without additional inference
-    cost.
+    \item  We use masked generative distillation to transfer the pre-trained
+    semantic-guided diffusion representations to BEV perception models,
+    enabling competitive performance against task-specific diffusion approaches
+    while preserving the inference cost of the underlying BEV model.
 \end{itemize}
 
 
@@ -185,10 +197,10 @@ respectively~\citep{Controlnet,T2IAdapter}. Uni-ControlNet unifies multiple
 local conditions, including segmentation maps, within a single model and injects
 their multi-scale features through Feature Denormalization (FDN), which
 spatially modulates normalized diffusion features~\citep{Uni-C}. Inspired by
-this line of work, we develop semantic BEV adaptive modulation (SBAM) to inject 
+this line of work, we develop Semantic BEV Adaptive Modulation (SBAM) to inject 
 a dense semantic BEV prior into BEV diffusion features. Unlike image synthesis methods, 
 our semantic condition is constructed by projecting multi-view semantic masks into 
-the BEV space and isused to learn task-agnostic scene representations rather than 
+the BEV space and is used to learn task-agnostic scene representations rather than 
 synthesize images.
 
 
@@ -206,7 +218,7 @@ noisy feature $\mathbf{x}_t$ as
   \sqrt{\bar{\alpha}_t}\mathbf{x}_0 +
   \sqrt{1-\bar{\alpha}_t}\boldsymbol{\epsilon},
   \qquad
-  \boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}).
+  \boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}),
 \end{equation}
 where $\bar{\alpha}_t$ is the cumulative product of the noise schedule. A
 denoising network is then trained to recover information about

@@ -6,28 +6,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.runner import force_fp32
 
+'''
+
+Revisied Verison of seg_bev_aligner_one_hot_da3.py
+
+- debug the error in SegEmbedEncoder
+
+'''
+
 
 class SegEmbedEncoder(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, downsample_factor=2):
         super().__init__()
         self.num_classes = num_classes
-        self.downsample_factor = 2
+        self.downsample_factor = float(downsample_factor)
 
     def forward(self, seg_id):
         B, V, H, W = seg_id.shape
         seg_id = seg_id.view(B * V, H, W)
-        # TODO: clamp bug 수정 필요 clamp(min=-1, max=self.num_classes)
-        seg_id = seg_id.clamp(min=-1, max=self.num_classes - 1)
+        # Keep valid semantic IDs, including sky id 16 when num_classes=16.
+        seg_id = seg_id.clamp(min=-1, max=self.num_classes)
         seg_id = torch.where(seg_id == -1, torch.zeros_like(seg_id), seg_id)
 
-        # Nearest downsampling (이산 ID에 수학적으로 유효하며, One-hot 연산 이전에 실행하여 메모리 최적화)
-        seg_id_ds = F.interpolate(
-            seg_id.unsqueeze(1).float(),
-            scale_factor=0.5, mode='nearest'
-        ).squeeze(1).long()                           # [B*V, H//2, W//2]
+        if self.downsample_factor == 1.0:
+            seg_id_ds = seg_id.long()
+        else:
+            # Nearest downsampling preserves discrete class IDs.
+            seg_id_ds = F.interpolate(
+                            seg_id.unsqueeze(1).float(),
+                            scale_factor=1.0 / self.downsample_factor,
+                            mode='nearest'
+                        ).squeeze(1).long()
 
-        seg_oh = F.one_hot(seg_id_ds, num_classes=self.num_classes + 1).float()        # [B*V, H//2, W//2, num_classes+1]
-        seg_oh = seg_oh.permute(0, 3, 1, 2).contiguous()  # [B*V, num_classes+1, H//2, W//2]
+        seg_oh = F.one_hot(seg_id_ds, num_classes=self.num_classes+1).float()
+        seg_oh = seg_oh.permute(0, 3, 1, 2).contiguous()
         return seg_oh
 
 
@@ -60,7 +72,7 @@ class SegBEVEncoder(nn.Module):
             dict {1: (B, C1, H1, W1)}
         """
         s1 = self.down0(bev_ctx)    # (B, 256, 50, 50)
-        return s1
+        return {1: s1}
 
 
 class SegBEVAligner(nn.Module):
@@ -68,11 +80,14 @@ class SegBEVAligner(nn.Module):
     BEVFormer-style IPM (Inverse Perspective Mapping) for multi-view
     segmentation ID map -> BEV feature. (Soft Histogram Embedding 방식)
 
-    Inputs:
+        Inputs:
         - seg_id:    (B, V, H, W) segmentation class IDs
         - img_metas: list of dicts (len=B), each with 'lidar2img': (V, 4, 4)
+        - seg_downsample_factor: downsampling factor applied before one-hot
+          encoding. Use 1 for full-resolution semantic maps and 2 to reproduce
+          the previous half-resolution setting.
     Returns:
-        - dict {1: ..., 2: ..., 4: ...} multi-scale BEV features
+        - dict {1: ...} BEV feature
     """
 
     def __init__(
@@ -82,11 +97,14 @@ class SegBEVAligner(nn.Module):
         pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
         num_points_in_pillar=4,
         num_classes=15,
+        seg_downsample_factor=2,
         emb_channels=256,           # 최종 BEV 임베딩 채널 수 (UNet의 FDN 모델 채널에 맞춤)
         final_dim=(252, 700),       # augmented image size (H, W)
         channel_mult=[1,2,4],
         eps=1e-6,
         v_min_frac=0.0,             # 이미지 상단 배제 비율 [0, 1): e.g. 0.3 → 상위 30%(하늘) 배제
+        sky_as_ignore=False,         # sky를 클래스가 아닌 '관측 실패'로 취급
+        pillar_z_range=None,        # (z_min, z_max) in lidar frame; None keeps old pc_range-uniform sampling
         # ---- Depth Consistency (FB-BEV) params ----
         depth_consistency_mode=None,  # 'gaussian' | 'bin_linear' | None
         depth_consistency_sigma=2.0,        # Gaussian mode: 허용 오차 σ (meters)
@@ -98,6 +116,7 @@ class SegBEVAligner(nn.Module):
         self.pc_range = pc_range
         self.num_points_in_pillar = num_points_in_pillar
         self.num_classes = num_classes
+        self.seg_downsample_factor = seg_downsample_factor
         self.emb_channels = emb_channels
         self.final_dim = final_dim
         self.eps = eps
@@ -109,9 +128,27 @@ class SegBEVAligner(nn.Module):
         self.depth_max = d_bound[1]
         self.depth_step = d_bound[2]
         self.num_depth_bins = int(round((d_bound[1] - d_bound[0]) / d_bound[2]))
+
+        self.pillar_z_range = pillar_z_range
+        if pillar_z_range is None:
+            self.pillar_z_norm = None
+        else:
+            zs = th.linspace(float(pillar_z_range[0]), float(pillar_z_range[1]),
+                             num_points_in_pillar)
+            zn = (zs - pc_range[2]) / (pc_range[5] - pc_range[2])
+            assert float(zn.min()) >= 0.0 and float(zn.max()) <= 1.0, \
+                f'pillar_z_range {tuple(pillar_z_range)} outside pc_range z ' \
+                f'[{pc_range[2]}, {pc_range[5]}]'
+            self.register_buffer('pillar_z_norm', zn, persistent=False)
+        
+        self.sky_as_ignore = sky_as_ignore
+        self.sky_id = num_classes if sky_as_ignore else None
         
         # ---- One-hot Segmentation Encoder (설계 간소화, 파라미터 없음) ----
-        self.seg_encoder = SegEmbedEncoder(num_classes=num_classes)
+        self.seg_encoder = SegEmbedEncoder(
+            num_classes=num_classes,
+            downsample_factor=seg_downsample_factor,
+        )
 
         # ---- Projection from Probability to Embedding ----
         self.prob_to_emb = nn.Sequential(
@@ -133,10 +170,15 @@ class SegBEVAligner(nn.Module):
     # ---------- BEVFormer-style 3D reference point generation ----------
     @staticmethod
     def _get_reference_points(H, W, Z=8, num_points_in_pillar=4,
-                              dim='3d', bs=1, device='cuda', dtype=th.float32,):
+                              dim='3d', bs=1, device='cuda', dtype=th.float32,
+                              z_norm=None):
         if dim == '3d':
-            zs = th.linspace(0.5, Z - 0.5, num_points_in_pillar,
-                                 dtype=dtype, device=device).view(-1, 1, 1).expand(num_points_in_pillar, H, W) / Z
+            if z_norm is None:
+                zs = th.linspace(0.5, Z - 0.5, num_points_in_pillar,
+                                 dtype=dtype, device=device) / Z
+            else:
+                zs = z_norm.to(device=device, dtype=dtype)
+            zs = zs.view(-1, 1, 1).expand(num_points_in_pillar, H, W)
             xs = th.linspace(0.5, W - 0.5, W,
                              dtype=dtype, device=device).view(1, 1, W).expand(num_points_in_pillar, H, W) / W
             ys = th.linspace(0.5, H - 0.5, H,
@@ -200,12 +242,33 @@ class SegBEVAligner(nn.Module):
 
         return uv, bev_mask, depth_out
 
-    # ---------- FB-BEV Depth Consistency (w_c) ----------
+    def _align_depth_to_image(self, depth_maps, img_metas, B, V, imgH, imgW):
+        """
+        FB-BEV Depth Consistency (w_c)
+        Bring DA3 depth into the *padded* image frame that `grid_sample` uses.
+        """
+        dH, dW = depth_maps.shape[-2:]
+
+        contentH, contentW = imgH, imgW
+        try:
+            # shape = img_metas[0]['img_shape'][0]   # padded size -> no pad applied
+            shape = img_metas[0]['ori_shape'][0]     # pre-pad content size
+            contentH, contentW = int(shape[0]), int(shape[1])
+        except (TypeError, KeyError, IndexError):
+            pass
+        contentH, contentW = min(contentH, imgH), min(contentW, imgW)
+
+        da3 = F.interpolate(
+            depth_maps.reshape(B * V, 1, dH, dW),
+            size=(contentH, contentW), mode='bilinear', align_corners=True)
+        
+        if contentH < imgH or contentW < imgW:
+            # zero in the pad region -> w_c = 0, mirroring the ignore label on seg
+            da3 = F.pad(da3, (0, imgW - contentW, 0, imgH - contentH))
+        return da3
+
     def _compute_depth_consistency(self, proj_depth, da3_depth):
         """
-        투영 깊이와 DA3 예측 깊이 간의 일관성 가중치를 계산한다.
-        가중치가 높을수록 해당 3D 점이 실제 표면 깊이에 부합함을 의미한다.
-
         Args:
             proj_depth: [B, V, Q, D] — 3D→2D 투영 시의 카메라 Z축 거리 (meters)
             da3_depth:  [B, V, Q, D] — 동일 (u,v) 위치에서 샘플링한 DA3 예측 깊이 (meters)
@@ -242,102 +305,26 @@ class SegBEVAligner(nn.Module):
                 (proj_hi == da3_lo).float() * proj_frac       * (1 - da3_frac) +  # hi-lo
                 (proj_hi == da3_hi).float() * proj_frac       * da3_frac           # hi-hi
             )
+            in_range = (
+                (proj_depth >= self.depth_min) & (proj_depth <= self.depth_max)
+                & (da3_depth >= self.depth_min) & (da3_depth <= self.depth_max)
+            )
+            w_c = w_c * in_range.float()
         else:
             return th.ones_like(proj_depth)
-
-        # DA3 depth ≈ 0인 무효 영역(하늘, 범위 밖) 마스크 처리
         w_c = w_c * (da3_depth > 0.5).float()
         return w_c
 
-    def compute_prob_only(self, seg_id, img_metas, depth_maps=None):
-        """Run BEV-projection (steps 1-8 of forward) and return the class-prob map.
+    def _frame_size(self, seg_id, img_metas):
+        try:
+            pad = img_metas[0]['pad_shape'][0]
+            return int(pad[0]), int(pad[1])
+        except (TypeError, KeyError, IndexError):
+            pass
+        if seg_id.dim() == 4:
+            return int(seg_id.shape[2]), int(seg_id.shape[3])
+        return int(self.final_dim[0]), int(self.final_dim[1])
 
-        Used by Stage-2 Student auxiliary seg head supervision. The path is
-        parameter-free (no `prob_to_emb` / `bev_pos_embed`), so this output
-        does not depend on Stage-1 BEVDiffuser checkpoint state.
-
-        Returns:
-            seg_bev_prob: [B, num_classes+1, bev_h, bev_w] softmax distribution.
-        """
-        assert seg_id.dim() == 4, f'seg_id is {seg_id.shape}'
-        B, V, H, W = seg_id.shape
-        device = seg_id.device
-
-        # (1) Embed segmentation IDs -> one-hot feature maps
-        seg_emb = self.seg_encoder(seg_id)
-        C = self.num_classes + 1
-
-        # (2) Generate BEV 3D reference points
-        Z_bins = int(round(self.pc_range[5] - self.pc_range[2]))
-        ref_3d = self._get_reference_points(
-            self.bev_h, self.bev_w, Z=Z_bins,
-            num_points_in_pillar=self.num_points_in_pillar,
-            dim='3d', bs=B, device=device, dtype=seg_emb.dtype,
-        )
-
-        # (3) Project 3D refs to 2D image coords
-        uv, bev_mask, proj_depth = self.point_sampling(ref_3d, img_metas)
-
-        # (4) Original pixel → normalised coords for grid_sample
-        Q = self.bev_h * self.bev_w
-        QD = Q * self.num_points_in_pillar
-        imgH, imgW = self.final_dim
-
-        uv_flat = uv.permute(1, 0, 2, 3, 4).contiguous().view(B, V, QD, 2)
-        u = uv_flat[..., 0]
-        v = uv_flat[..., 1]
-
-        v_sky_thresh = self.v_min_frac * imgH
-        valid_in = (u >= 0) & (u <= (imgW - 1)) & (v >= v_sky_thresh) & (v <= (imgH - 1))
-        bev_mask_flat = bev_mask.permute(1, 0, 2, 3).contiguous().view(B, V, QD)
-        mask_bv = bev_mask_flat & valid_in
-
-        gx = 2.0 * (u / (imgW - 1.0)) - 1.0
-        gy = 2.0 * (v / (imgH - 1.0)) - 1.0
-        grid = th.stack([gx, gy], dim=-1)
-
-        # (5) Nearest sampling from one-hot feature maps
-        grid_v = grid.view(B * V, QD, 1, 2)
-        sampled = F.grid_sample(
-            seg_emb, grid_v, mode='nearest',
-            padding_mode='zeros', align_corners=True,
-        )
-        sampled = sampled.squeeze(-1).permute(0, 2, 1).contiguous()
-        sampled = sampled.view(B, V, Q, self.num_points_in_pillar, C)
-
-        # (6) Depth Consistency Weighting + Masking
-        mask_bvqd = mask_bv.view(B, V, Q, self.num_points_in_pillar)
-
-        if depth_maps is not None and self.depth_consistency_mode is not None:
-            dH, dW = depth_maps.shape[-2:]
-            da3 = F.interpolate(
-                depth_maps.view(B * V, 1, dH, dW),
-                size=(imgH, imgW), mode='bilinear', align_corners=True,
-            )
-            da3_sampled = F.grid_sample(
-                da3, grid_v, mode='bilinear',
-                padding_mode='zeros', align_corners=True,
-            )
-            da3_sampled = da3_sampled.squeeze(1).squeeze(-1)
-            da3_sampled = da3_sampled.view(B, V, Q, self.num_points_in_pillar)
-
-            proj_depth_bvqd = proj_depth.permute(1, 0, 2, 3).contiguous()
-            w_c = self._compute_depth_consistency(proj_depth_bvqd, da3_sampled)
-            sampled = sampled * (mask_bvqd * w_c).unsqueeze(-1)
-        else:
-            sampled = sampled * mask_bvqd.unsqueeze(-1)
-
-        # (7) Weighted Histogram Counting
-        count_D = sampled.sum(dim=3)
-        count_map = count_D.sum(dim=1)
-
-        # Normalize to probability distribution
-        denom = count_map.sum(dim=-1, keepdim=True).clamp_min(self.eps)
-        f_bev_prob = count_map / denom
-
-        # (8) Reshape Soft-Histogram to Map format
-        seg_bev_prob = f_bev_prob.permute(0, 2, 1).contiguous().view(B, C, self.bev_h, self.bev_w)
-        return seg_bev_prob
 
     def forward(self, seg_id, img_metas, depth_maps=None):
         """
@@ -363,6 +350,7 @@ class SegBEVAligner(nn.Module):
             self.bev_h, self.bev_w, Z=Z_bins,
             num_points_in_pillar=self.num_points_in_pillar,
             dim='3d', bs=B, device=device, dtype=seg_emb.dtype,
+            z_norm=self.pillar_z_norm,
         )
 
         # (3) Project 3D refs to 2D image coords (depth를 보존하여 가중 투표에 활용)
@@ -371,7 +359,12 @@ class SegBEVAligner(nn.Module):
         # (4) Original pixel → normalised coords for grid_sample
         Q = self.bev_h * self.bev_w
         QD = Q * self.num_points_in_pillar
-        imgH, imgW = self.final_dim  # original image size
+        
+        # imgH, imgW = self.final_dim  # original image size
+        # debug image coordinate
+        imgH, imgW = self._frame_size(seg_id, img_metas)  # padded frame from pad_shape
+        assert (H, W) == (imgH, imgW), \
+            f'seg map {(H, W)} != padded frame {(imgH, imgW)}; seg must be padded to pad_shape'
 
         # Reshape uv: (V,B,Q,D,2) → (B,V,QD,2)
         uv_flat = uv.permute(1, 0, 2, 3, 4).contiguous().view(B, V, QD, 2)
@@ -405,13 +398,10 @@ class SegBEVAligner(nn.Module):
         mask_bvqd = mask_bv.view(B, V, Q, self.num_points_in_pillar)  # [B, V, Q, D]
 
         if depth_maps is not None and self.depth_consistency_mode is not None:
-            dH, dW = depth_maps.shape[-2:]                                      # e.g. (448, 798)
-
-            # (6a) DA3 depth → final_dim으로 bilinear resize (해상도 정합)
-            da3 = F.interpolate(
-                depth_maps.view(B * V, 1, dH, dW),
-                size=(imgH, imgW), mode='bilinear', align_corners=True
-            )                                                                   # [B*V, 1, imgH, imgW]
+            # (6a) DA3 depth → 이미지 파이프라인과 동일하게 resize + zero-pad
+            #      (seg는 ori_shape로 resize 후 pad_shape로 패딩되므로 depth도 동일 경로여야
+            #       같은 grid로 샘플링했을 때 같은 픽셀을 읽는다)
+            da3 = self._align_depth_to_image(depth_maps, img_metas, B, V, imgH, imgW)  # [B*V,1,imgH,imgW]
 
             # (6b) 투영된 (u,v) 좌표에서 DA3 depth 샘플링 (seg와 동일한 grid 사용)
             da3_sampled = F.grid_sample(
@@ -436,6 +426,12 @@ class SegBEVAligner(nn.Module):
         # (7) Weighted Histogram Counting
         count_D = sampled.sum(dim=3)     # (B, V, Q, C) : Z축(Pillar) 방향 가중합
         count_map = count_D.sum(dim=1)   # (B, Q, C)    : View(카메라) 방향 합산
+        
+        if self.sky_id is not None:
+            sky_ch = self.sky_id
+            count_map = count_map.clone()
+            count_map[..., 0:1] = count_map[..., 0:1] + count_map[..., sky_ch:sky_ch + 1]
+            count_map[..., sky_ch:sky_ch + 1] = 0.0
 
         # Normalize to probability distribution
         denom = count_map.sum(dim=-1, keepdim=True).clamp_min(self.eps)
@@ -452,6 +448,6 @@ class SegBEVAligner(nn.Module):
         seg_bev = seg_bev + self.bev_pos_embed
 
         # (11) Multi-scale encoding
-        seg_bev = self.seg_bev_encoder(seg_bev)
+        seg_bev_dict = self.seg_bev_encoder(seg_bev)
 
-        return seg_bev, seg_bev_prob  # {1: [B,C,H,W], 2: [B,C*2,H//2,W//2], 4: [B,C*4,H//4,W//4]}
+        return seg_bev_dict  # {1: [B,C,H,W]}

@@ -58,7 +58,7 @@ use_semantics = True
 use_depth = True  # DA3 depth maps for FB-BEV depth consistency in BEV aligners
 
 unet = dict(
-    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v2.DiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v2_2.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
@@ -89,12 +89,12 @@ unet = dict(
             num_points_in_pillar=4,
             pillar_z_range=(-1.84, 1.16),
             num_classes=16,
-            seg_downsample_factor=1,
+            seg_downsample_factor=2,  # 1=full-res semantic one-hot, 2=current half-res setting
             emb_channels=256,
             channel_mult=[1, 1, 1],  # keep 256ch at every scale; must match seg_channels above
             final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
             depth_consistency_mode='gaussian',  # gaussian | bin_linear | None
-            depth_consistency_sigma=3.0,
+            depth_consistency_sigma=4.0,
         ),
     ),
 )
@@ -357,7 +357,7 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=6)
+checkpoint_config = dict(interval=1, max_keep_ckpts=2)
 
 custom_hooks = [
     dict(type='UpdateTarget', epoch_interval=0)

@@ -59,12 +59,12 @@ class SegBEVEncoder(nn.Module):
             nn.Conv2d(c1, c1, kernel_size=3, stride=1, padding=1),
             nn.SiLU(),
         )
-        # ds=2: Strided Conv (학습 기반 다운샘플 + 채널 확장 c1→c2)
+        # ds=2: Strided Conv (학습 기반 다운샘플 + 채널 확장 X)
         self.down1 = nn.Sequential(
             nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1),
             nn.SiLU(),
         )
-        # ds=4: Strided Conv (학습 기반 다운샘플 + 채널 확장 c2→c4)
+        # ds=4: Strided Conv (학습 기반 다운샘플 + 채널 확장 X)
         self.down2 = nn.Sequential(
             nn.Conv2d(c2, c4, kernel_size=3, stride=2),  # c1→c2 아님, down1 출력(c2)을 받음
             nn.SiLU(),

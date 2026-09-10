@@ -92,7 +92,7 @@ unet = dict(
             num_points_in_pillar=4,
             pillar_z_range=(-1.84, 1.16),
             num_classes=16,
-            seg_downsample_factor=2,  # 1=full-res semantic one-hot, 2=current half-res setting
+            # seg_downsample_factor=1,  # 1=full-res semantic one-hot, 2=current half-res setting
             emb_channels=256,
             channel_mult=[1, 1, 1],  # keep 256ch at every scale; must match seg_channels above
             final_dim=(480, 800),  # H x W after RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32)
