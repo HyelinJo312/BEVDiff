@@ -123,7 +123,8 @@ class SelfAttnTransformer(nn.Module):
         x = rearrange(x, 'b c h w -> b (h w) c')
         for block in self.transformer_blocks:
             x = block(x)
-        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
+        # Restore contiguous BCHW layout before the output convolution.
+        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         x = self.proj_out(x)
         return x + x_in
 
@@ -344,18 +345,28 @@ class ResBlock(TimestepBlock):
 
 
 class SBAM(nn.Module):
-    def __init__(self, norm_channels, cond_channels):
+    """Spatial modulation gated by timestep and optional global semantics."""
+
+    def __init__(self, norm_channels, cond_channels, emb_channels):
         super().__init__()
         self.param_free_norm = normalization(norm_channels)
         self.conv_gamma = nn.Conv2d(cond_channels, norm_channels, kernel_size=3, padding=1)
         self.conv_beta  = nn.Conv2d(cond_channels, norm_channels, kernel_size=3, padding=1)
+        # 2 * sigmoid(0) = 1: preserve the original SBAM modulation at init.
+        self.time_gate = nn.Sequential(
+            SiLU(),
+            zero_module(linear(emb_channels, 2)),
+        )
 
-    def forward(self, x, seg_cond):
+    def forward(self, x, seg_cond, emb):
         assert seg_cond.size()[2:] == x.size()[2:]
         normalized = self.param_free_norm(x)
         gamma = self.conv_gamma(seg_cond)
         beta = self.conv_beta(seg_cond)
-        out = normalized * (1 + gamma) + beta
+
+        gate = (2 * th.sigmoid(self.time_gate(emb))).to(gamma.dtype)
+        g_gamma, g_beta = gate[:, :, None, None].chunk(2, dim=1)
+        out = normalized * (1 + g_gamma * gamma) + g_beta * beta
         return out
 
 class SBAMResBlock(TimestepBlock):
@@ -371,7 +382,8 @@ class SBAMResBlock(TimestepBlock):
             up=False,
             down=False,
             out_size=None,
-            seg_channels=None
+            seg_channels=None,
+            use_scale_shift_norm=False,
     ):
         super().__init__()
         self.channels = channels
@@ -380,9 +392,10 @@ class SBAMResBlock(TimestepBlock):
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.use_checkpoint = use_checkpoint
+        self.use_scale_shift_norm = use_scale_shift_norm
 
-        self.norm_0 = SBAM(channels, seg_channels)
-        self.norm_1 = SBAM(self.out_channels, seg_channels)
+        self.norm_0 = SBAM(channels, seg_channels, emb_channels)
+        self.norm_1 = SBAM(self.out_channels, seg_channels, emb_channels)
 
         self.updown = up or down
 
@@ -405,7 +418,7 @@ class SBAMResBlock(TimestepBlock):
             SiLU(),
             linear(
                 emb_channels,
-                self.out_channels),
+                2 * self.out_channels if use_scale_shift_norm else self.out_channels),
         )
 
         self.out_layers = nn.Sequential(
@@ -430,20 +443,25 @@ class SBAMResBlock(TimestepBlock):
         return self._forward(x, emb, seg_bev)
 
     def _forward(self, x, emb, seg_bev):
-        h = self.norm_0(x, seg_bev)
+        h = self.norm_0(x, seg_bev, emb)
         h = self.in_layers(h)
 
-        # time embedding
+        # Shared timestep + optional global semantic embedding.
         emb_out = self.emb_layers(emb).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
 
-        h = h + emb_out
-        h = self.norm_1(h, seg_bev)
+        if self.use_scale_shift_norm:
+            scale, shift = th.chunk(emb_out, 2, dim=1)
+            h = self.norm_1(h, seg_bev, emb) * (1 + scale) + shift
+        else:
+            h = h + emb_out
+            h = self.norm_1(h, seg_bev, emb)
         h = self.out_layers(h)
         return self.skip_connection(x) + h
 
-
+    
+    
 class DiffusionUNetModel(nn.Module):
     """
     Seg-only conditional UNet.
@@ -497,14 +515,15 @@ class DiffusionUNetModel(nn.Module):
             num_head_channels=-1,
             num_heads_upsample=-1,
             use_scale_shift_norm=False,
+            sbam_use_scale_shift_norm=False,
             resblock_updown=False,
             use_spatial_transformer=True,
             image_size=256,
             num_attention_blocks=1,
             num_pre_downsample=0,
             transformer_depth=1,
-            return_multiscale=True,
             legacy=True,
+            use_global_seg=True,
     ):
         super().__init__()
 
@@ -530,7 +549,8 @@ class DiffusionUNetModel(nn.Module):
         self.num_heads_upsample = num_heads_upsample
 
         # multi-scale features index
-        self.return_multiscale = return_multiscale
+        self.use_global_seg = use_global_seg
+        self.sbam_use_scale_shift_norm = sbam_use_scale_shift_norm
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -550,13 +570,20 @@ class DiffusionUNetModel(nn.Module):
                         ))
             self.image_size = self.image_size // 2
 
-        # Semantic BEV condition (only conditioning path)
+        # Spatial semantic condition and optional global semantic embedding.
         self.seg_aligner = SegBEVAligner(**seg_bev_aligner)
-
-        if self.return_multiscale:
-            self.multi_concat = MultiScaleConcatWeighted(in_chs=(model_channels, model_channels*2, model_channels*4, model_channels*4),
-                                                out_dim=out_channels,
-                                                mid=model_channels)
+        
+        self.seg_global_embed = None
+        if self.use_global_seg:
+            global_channels = self.seg_aligner.emb_channels
+            self.seg_global_embed = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(start_dim=1),
+                nn.LayerNorm(global_channels),
+                linear(global_channels, global_channels),
+                SiLU(),
+                zero_module(linear(global_channels, time_embed_dim)),
+            )
 
         ch = input_ch = int(channel_mult[0] * model_channels)
         self.input_blocks = nn.ModuleList(
@@ -672,6 +699,7 @@ class DiffusionUNetModel(nn.Module):
                             dims=dims,
                             use_checkpoint=use_checkpoint,
                             seg_channels=seg_channels[level],
+                            use_scale_shift_norm=sbam_use_scale_shift_norm,
                         )
                     ]
                 else:
@@ -748,34 +776,38 @@ class DiffusionUNetModel(nn.Module):
             if isinstance(m, SBAMResBlock):
                 m.use_checkpoint = True
 
-    def encode_seg(self, seg_cond, img_metas, depth_maps=None, semantic_probabilities=None):
+    def encode_seg(self, seg_cond, img_metas, depth_maps=None, semantic_prob=None):
         """
         Project the multi-view seg map to multi-scale semantic BEV maps.
 
         """
         return self.seg_aligner(seg_cond, img_metas, depth_maps=depth_maps,
-                                semantic_probabilities=semantic_probabilities)
+                                semantic_prob=semantic_prob)
     
 
-    def forward(self, x, timesteps, img_metas, seg_cond=None, depth_maps=None, seg_bev_maps=None,
-                semantic_probabilities=None):
+    def forward(self, x, timesteps, img_metas, seg_cond=None, depth_maps=None, seg_bev_maps=None, semantic_prob=None):
         hs = []
 
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
         # Semantic BEV maps
-        if seg_bev_maps is not None and semantic_probabilities is not None:
+        if seg_bev_maps is not None and semantic_prob is not None:
             raise ValueError('Choose encoded BEV maps or raw cached probabilities, not both')
+        
         if seg_bev_maps is None:
             seg_bev_maps = self.encode_seg(seg_cond, img_metas, depth_maps=depth_maps,
-                                           semantic_probabilities=semantic_probabilities)
+                                           semantic_prob=semantic_prob)
+
+        if self.use_global_seg:
+            global_emb = self.seg_global_embed(seg_bev_maps[1].to(emb))
+            emb = emb + global_emb.to(emb)
 
         h = x.type(self.dtype)  # h: (B, C, H, W)
 
         for module in self.downsample_blocks:
             h = module(h)
 
-        # Encoder (self-attention only, no external condition)
+        # Encoder (self-attention with time + optional global conditioning)
         for module in self.input_blocks:
             h = module(h, emb)
             hs.append(h)
@@ -783,7 +815,7 @@ class DiffusionUNetModel(nn.Module):
         # Middle block
         h = self.middle_block(h, emb)
 
-        # Decoder (SBAM semantic BEV conditioning in every block)
+        # Decoder: combined embedding also controls both SBAM scalar gates.
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
             seg_bev = self._select_ctx(seg_bev_maps, module)

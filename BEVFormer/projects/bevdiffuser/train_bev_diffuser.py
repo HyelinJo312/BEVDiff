@@ -24,7 +24,16 @@ import accelerate
 import datasets
 import numpy as np
 import torch
-torch.backends.cudnn.enabled = False
+# torch.backends.cudnn.enabled = False
+
+# cuDNN 및 convolution 알고리즘 자동 선택
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
+# FP32 convolution과 행렬 연산에 TF32 사용 허용
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_tf32 = True
+
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
@@ -283,6 +292,7 @@ def train():
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
+    tb_writer = None
     if accelerator.is_main_process:   
         tracker_config = dict(vars(args))
 
@@ -304,7 +314,6 @@ def train():
         accelerator.init_trackers(project_name=args.tracker_project_name, 
                                   config=tracker_config,
                                   init_kwargs=init_kwargs)
-        tb_writer = None
         if args.report_to == "tensorboard":
             tb_logdir = os.path.join(args.output_dir, "tensorboard_logs")
             tb_writer = SummaryWriter(log_dir=tb_logdir)
@@ -322,7 +331,7 @@ def train():
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Is SD21: {is_training_sd21}")
-    logger.info(f'[LayoutEncoder] Class names: {bev_cfg.total_class}') 
+    logger.info(f'[LayoutEncoder] Class names: {bev_cfg.class_names}')
     
     global_step = 0
     first_epoch = 0
@@ -345,7 +354,7 @@ def train():
         step_cnt = global_step * args.gradient_accumulation_steps
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=120)
+    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=100)
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -475,7 +484,7 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step % args.checkpointing_steps == 0 and global_step > 30000:
+                    if global_step % args.checkpointing_steps == 0 and global_step > 40000:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')

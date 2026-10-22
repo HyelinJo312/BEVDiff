@@ -20,9 +20,6 @@ plugin_dir = 'projects/mmdet3d_plugin/'
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 
-
-
-
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
@@ -55,26 +52,20 @@ num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
 use_semantics = True
+
 use_depth = True  # Metric3D raw metric depth for semantic surface splatting
 metric_depth_range = (2.5, 170.0)
-
-# Enable only after the cache covers every train/validation sample.
-use_semantic_bev_cache = False
-# This workspace's data directory is on NFS, not a local SSD.
-semantic_bev_cache_root = '{{ fileDirname }}/../../../data/semantic_bev_cache/metric3d_v5'
-# Bump this identifier whenever the frozen SAM3/Metric3D source maps change.
-semantic_bev_cache_source_version = 'sam3_metric3d_v1'
+use_semantic_bev_cache = True
+semantic_bev_cache_root = '../../data/semantic_bev'
 
 # Seg-only UNet: no DINO / layout condition.
-# Attention is SelfAttnTransformer (pure self-attention, redundant attn2 removed),
-# Semantic BEV (FDN) is injected in EVERY decoder block.
 unet = dict(
     type='layout_diffusion.seg_diffusion_unet_v5.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
         use_scale_shift_norm=True,
-        return_multiscale=False,
+        use_global_seg=True,  # GAP+MLP global semantics added to time embedding and gates
         in_channels=_dim_,
         out_channels=_dim_,
         seg_channels=[256, 256, 256],
@@ -233,9 +224,9 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'CustomNuScenesDiffusionDataset_seg_depth_v2'
-data_root = '{{ fileDirname }}/../../../data/nuscenes/'
-semantic_root = '{{ fileDirname }}/../../../data/nuscenes_sam3'
-depth_root = '{{ fileDirname }}/../../../data/nuscenes_metric3d'
+data_root = '../../data/nuscenes/'
+semantic_root = '../../data/nuscenes_sam3'
+depth_root = '../../data/nuscenes_metric3d'
 file_client_args = dict(backend='disk')
 
 
@@ -275,8 +266,8 @@ test_pipeline = [
 semantic_bev_cache_settings = dict(
     use_semantic_bev_cache=use_semantic_bev_cache,
     semantic_bev_cache_root=semantic_bev_cache_root,
-    semantic_bev_cache_projection=unet['parameters']['seg_bev_aligner'],
-    semantic_bev_cache_source_version=semantic_bev_cache_source_version,
+    semantic_bev_cache_shape=(unet['parameters']['seg_bev_aligner']['num_classes'] + 1,
+                              bev_h_, bev_w_),
 )
 
 data = dict(

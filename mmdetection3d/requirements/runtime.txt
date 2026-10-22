@@ -1,0 +1,13 @@
+lyft_dataset_sdk
+# unpinned for py3.10 / B200: not imported by mmdet3d or BEVFormer,
+# and scikit-image only needs >=2.2
+networkx
+# we may unlock the verion of numba in the future
+numba
+numpy
+nuscenes-devkit
+plyfile
+scikit-image
+# by default we also use tensorboard to log results
+tensorboard
+trimesh>=2.35.39,<2.35.40

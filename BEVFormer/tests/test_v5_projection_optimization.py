@@ -56,6 +56,7 @@ class ProjectionOptimizationTest(unittest.TestCase):
         dataset = object.__new__(CustomNuScenesDiffusionDataset_seg_depth_v2)
         dataset.opencv_num_threads = 1
         dataset.use_semantic_bev_cache = False
+        dataset.load_temporal_depth = False
         dataset.use_semantics = dataset.use_depth = False
         original = cv2.getNumThreads()
         try:

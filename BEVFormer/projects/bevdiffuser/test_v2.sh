@@ -1,6 +1,6 @@
 set -e
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+# export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 BEV_CONFIG="../configs/bevdiffuser/layout_tiny_seg_v4_sam_v2.py"
 # BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
@@ -23,12 +23,13 @@ PREDICTION_TYPE="sample"
 # python -m torch.distributed.launch --master_port 9995 test_bev_diffuser_dino.py \
 torchrun --nproc_per_node=4 \
     --master_port 9993 \
-    test_bev_diffuser_seg.py \
+    test_bev_diffuser_occ_only_seg.py \
     --bev_config $BEV_CONFIG \
     --bev_checkpoint $BEV_CHECKPOINT \
     --checkpoint_dir $CHECKPOINT_DIR \
     --prediction_type $PREDICTION_TYPE \
-    --noise_timesteps 5 \
-    --denoise_timesteps 5 \
+    --noise_timesteps 200 \
+    --denoise_timesteps 200 \
     --num_inference_steps 5 \
+    --guidance_scale 3.0
     # --use_classifier_guidence \

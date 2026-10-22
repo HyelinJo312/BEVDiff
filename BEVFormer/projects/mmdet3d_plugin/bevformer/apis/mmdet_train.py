@@ -11,6 +11,7 @@
 # ---------------------------------------------
 #  Modified by Zhiqi Li
 # ---------------------------------------------
+import copy
 import random
 import warnings
 
@@ -95,6 +96,13 @@ def custom_train_detector(model,
                 device_ids=[torch.cuda.current_device()],
                 broadcast_buffers=False,
                 find_unused_parameters=find_unused_parameters)
+        # MMCV 1.x forward() reads this private flag, absent in newer PyTorch.
+        # Training uses train_step(), so the error otherwise appears only at
+        # evaluation. Preserve the flag when supplied by older PyTorch.
+        for wrapped_model in (model, eval_model):
+            if wrapped_model is not None and not hasattr(
+                    wrapped_model, '_use_replicated_tensor_module'):
+                wrapped_model._use_replicated_tensor_module = False
     else:
         model = MMDataParallel(
             model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)
@@ -173,7 +181,8 @@ def custom_train_detector(model,
     # register eval hooks
     if validate:
         # Support batch_size > 1 in validation
-        val_samples_per_gpu = cfg.data.val.pop('samples_per_gpu', 1)
+        val_dataset_cfg = copy.deepcopy(cfg.data.val)
+        val_samples_per_gpu = val_dataset_cfg.pop('samples_per_gpu', 1)
         if val_samples_per_gpu > 1:
             assert False
             # Replace 'ImageToTensor' to 'DefaultFormatBundle'
@@ -187,8 +196,8 @@ def custom_train_detector(model,
             'test_mode': True
         }
 
-        cfg.data.test.load_annos = True
-        val_dataset = custom_build_dataset(cfg.data.test, dataset_default_args)
+        val_dataset_cfg.load_annos = True
+        val_dataset = custom_build_dataset(val_dataset_cfg, dataset_default_args)
 
         val_dataloader = build_dataloader(
             val_dataset,
@@ -199,7 +208,7 @@ def custom_train_detector(model,
             shuffler_sampler=cfg.data.shuffler_sampler,  # dict(type='DistributedGroupSampler'),
             nonshuffler_sampler=cfg.data.nonshuffler_sampler,  # dict(type='DistributedSampler'),
         )
-        eval_cfg = cfg.get('evaluation', {})
+        eval_cfg = copy.deepcopy(cfg.get('evaluation', {}))
         # eval_cfg['start'] = 0
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
         eval_cfg['jsonfile_prefix'] = osp.join(cfg.work_dir, 'val',time.ctime().replace(' ','_').replace(':','_'))

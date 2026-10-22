@@ -180,3 +180,5 @@ events.out.tfevents.*
 # ===== Experiment output artifacts (plots, etc.) =====
 BEVFormer/tools/*.pdf
 .omc/
+
+/BEVFormerSeg/segmentation_result.json

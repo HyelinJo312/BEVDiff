@@ -2,8 +2,6 @@
 
     "version": "0.2.0",
     "configurations": [
-
-
         {
             "name": "Train_bevdiffuser", 
             "type": "debugpy",
@@ -14,12 +12,9 @@
             "cwd": "${workspaceFolder}/BEVFormer/projects/bevdiffuser",
             "console": "integratedTerminal",
             "args": [
-        
-                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/bev_tiny_onlyseg_sam_v2_da3.py",
-                    // "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/layout_tiny.py", 
-                // "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
+                "--bev_config", "${workspaceFolder}/BEVFormer/projects/configs/bevdiffuser/bev_tiny_onlyseg_sam_v2_metric3d_logcount.py",
                 "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
-                "--pretrained_unet_checkpoint", "None",
+                // Fresh training: omit --pretrained_unet_checkpoint.
                 "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-2-1",
                 "--train_batch_size", "1",
                 "--dataloader_num_workers", "1",
@@ -27,19 +22,15 @@
                 "--max_train_steps", "5",
                 "--learning_rate", "1e-4",
                 "--lr_scheduler", "constant",
-                "--output_dir", "${workspaceFolder}/train/debug_output",
+                "--output_dir", "${workspaceFolder}/train/debug_output", 
                 "--checkpoints_total_limit", "1",
                 "--checkpointing_steps", "5",
                 "--tracker_run_name", "debug_run",
                 "--tracker_project_name", "debug_project",
                 "--uncond_prob", "0.2",
                 "--prediction_type", "sample",
-                "--task_loss_scale", "0.1",
-                "--launcher", "none",
-                // "--task_loss_switch_step", "None"
-                // "--freeze_bev_model"
-                // "--report_to", "none"
-                
+                "--task_loss_scale", "0",
+                // "--launcher", "none",
             ],
 
             "env": {
@@ -51,7 +42,49 @@
                 "MASTER_ADDR": "127.0.0.1",
                 "MASTER_PORT": "29500",
                 "TORCH_DISTRIBUTED_DEBUG": "DETAIL"
+            }
+        },
 
+        {
+            "name": "Train_bevdiffuser_seg", 
+            "type": "debugpy",
+            "request": "launch",
+            //"module": "torch.distributed.launch",
+            //"justMyCode": true,
+            "program": "${workspaceFolder}/BEVFormerSeg/projects/bevdiffuser/train_bev_diffuser_only_seg.py",
+            "cwd": "${workspaceFolder}/BEVFormer/projects/bevdiffuser",
+            "console": "integratedTerminal",
+            "args": [
+                "--bev_config", "${workspaceFolder}/BEVFormerSeg/projects/configs/bevdiffuser/bev_tiny_det_semantic_onlyseg_sam_metric3d.py",
+                "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
+                // Fresh training: omit --pretrained_unet_checkpoint.
+                "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-2-1",
+                "--train_batch_size", "1",
+                "--dataloader_num_workers", "1",
+                "--gradient_accumulation_steps", "1",
+                "--max_train_steps", "5",
+                "--learning_rate", "1e-4",
+                "--lr_scheduler", "constant",
+                "--output_dir", "${workspaceFolder}/train/debug_output", 
+                "--checkpoints_total_limit", "1",
+                "--checkpointing_steps", "5",
+                "--tracker_run_name", "debug_run",
+                "--tracker_project_name", "debug_project",
+                "--uncond_prob", "0.2",
+                "--prediction_type", "sample",
+                "--task_loss_scale", "0",
+                // "--launcher", "none",
+            ],
+
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "RANK": "0",
+                "LOCAL_RANK": "0",
+                "WORLD_SIZE": "1",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+                "TORCH_DISTRIBUTED_DEBUG": "DETAIL"
             }
         },
                         
@@ -94,18 +127,19 @@
             "request": "launch",
             //"module": "torch.distributed.launch",
             //"justMyCode": true,
-            "program": "${workspaceFolder}/BEVFormer/tools/train_dino.py",
+            "program": "${workspaceFolder}/BEVFormer/tools/train_onlyseg.py",
+            "cwd": "${workspaceFolder}/BEVFormer",
             "console": "integratedTerminal",
             "args": [
-                "${workspaceFolder}/BEVFormer/projects/configs/diff_bevformer/bev_tiny_dino_seg.py",
+                "${workspaceFolder}/BEVFormer/projects/configs/diff_bevformer/bev_tiny_onlyseg_sam_metric3d_vidar.py",
                 // "--launcher", "None",
                 "--deterministic",
                 "--work_dir", "${workspaceFolder}/results_debug",
                 "--tracker_project_name", "DiffBEVFormer_debug",
                 "--tracker_run_name", "BEVFormer_tiny_with_BEVDiffuser_debug", 
-                "--unet_checkpoint_dir", "${workspaceFolder}/results/version2/stage1/BEVDiffuser_tiny_dinoseg_v1/checkpoint-50000",
-                "--load_from", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
-                "--resume_from", "None",
+                "--unet_checkpoint_dir", "${workspaceFolder}/results/bevdiffuser/BEVDiffuser_tiny_onlyseg_sam3_metric3d_vidar/checkpoint-50000",
+                // "--load_from", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
+                // "--resume_from", "None",
                 "--report_to", "tensorboard"
             ],
 

@@ -11,19 +11,12 @@ from mmcv.parallel import DataContainer as DC
 from projects.mmdet3d_plugin.datasets.nuscenes_dataset import CustomNuScenesDataset
 from projects.mmdet3d_plugin.datasets.nuscenes_dataset_v2 import CustomNuScenesDatasetV2
 import cv2
+from pyquaternion import Quaternion
+from projects.mmdet3d_plugin.datasets.nuscenes_occ import NuSceneOcc
+
 
 def get_content_shapes(img_metas):
     """Per-camera (H, W, C) of the real image content inside the padded frame.
-
-    `PadMultiViewImage._pad_img` overwrites BOTH 'img_shape' and 'pad_shape'
-    with the *padded* size, so 'img_shape' no longer records the pre-pad content
-    size -- that survives only in 'ori_shape'. Resizing a seg map to 'img_shape'
-    therefore stretches it across the pad region: with
-    RandomScaleImageMultiViewImage(0.5) + PadMultiViewImage(32) the content is
-    450x800 inside a 480x800 frame, so 900x1600 -> 480x800 is a 480/450
-    vertical stretch that drags labels ~0.0625*row upward relative to the image
-    (measured: -7/-13/-19/-24 px at rows 90-450). `fm_feature.py` already uses
-    the ori_shape -> img_shape convention for DA3 depth.
 
     """
     img_shapes = img_metas['img_shape']
@@ -669,95 +662,235 @@ class CustomNuScenesDiffusionDataset_seg_depth(CustomNuScenesDataset):
             view_depths.append(depth_tensor)
         return torch.stack(view_depths, dim=0)  # [V, H, W]
 
-
-
            
+def _retain_meta_key(transform, key):
+    if type(transform).__name__ == 'CustomCollect3D':
+        if key not in transform.meta_keys:
+            transform.meta_keys = tuple(transform.meta_keys) + (key,)
+        return 1
+    children = getattr(transform, 'transforms', ())
+    if isinstance(children, (list, tuple)):
+        return sum(_retain_meta_key(child, key) for child in children)
+    return _retain_meta_key(children, key)
+
+
+def _unwrap_singleton(value):
+    while isinstance(value, DC) or (isinstance(value, (list, tuple)) and len(value) == 1):
+        value = value.data if isinstance(value, DC) else value[0]
+    return value
+
+
+def _last_occurrence_mask(tokens):
+    seen = set()
+    valid = [False] * len(tokens)
+    for index in range(len(tokens) - 1, -1, -1):
+        valid[index] = tokens[index] not in seen
+        seen.add(tokens[index])
+    return valid
+
+
 @DATASETS.register_module()
-class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDiffusionDataset_seg_depth):
-    """SAM3 + raw Metric3D maps in the actual augmented image coordinates.
+class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDataset):
+    """NuScenes images with aligned SAM3/Metric3D maps or cached semantic BEV."""
 
-    Stores the original projection in metadata and recovers the image-plane
-    transform from the pipeline's updated lidar2img. This includes resize,
-    crop and flip when those transforms update the calibration, as required
-    by BEVFormer. Padding is applied separately; photometric transforms never
-    touch semantic IDs or metric depth. Outputs keep the v1 DataContainer API.
-    """
-
-    def __init__(self, *args, depth_raw_shape=(900, 1600),
-                 depth_range=(2.5, 170.0), opencv_num_threads=1,
+    def __init__(self, pc_range, use_3d_bbox=True, num_classes=12, num_bboxes=300,
+                 use_semantics=True, use_depth=False, semantic_path=None,
+                 depth_path=None, seg_id_remap=None, *args,
+                 depth_raw_shape=(900, 1600), depth_range=(2.5, 170.0),
+                 opencv_num_threads=1, camera_types=None,
                  use_semantic_bev_cache=False, semantic_bev_cache_root=None,
-                 semantic_bev_cache_projection=None, semantic_bev_cache_source_version=None,
-                 **kwargs):
+                 semantic_bev_cache_shape=None, semantic_bev_cache_projection=None,
+                 load_depth_in_cache=False, load_temporal_depth=False,
+                 use_semantic_temporal=False, semantic_type='share',
+                 semantic_logcount_scale=1e5, **kwargs):
         super().__init__(*args, **kwargs)
-        if int(opencv_num_threads) != opencv_num_threads or opencv_num_threads < 1:
-            raise ValueError('opencv_num_threads must be a positive integer')
-        self.opencv_num_threads = int(opencv_num_threads)
-        if len(depth_raw_shape) != 2 or min(depth_raw_shape) <= 0:
-            raise ValueError('depth_raw_shape must be a positive (H, W) pair')
-        if len(depth_range) != 2 or not 0 < depth_range[0] < depth_range[1]:
-            raise ValueError('depth_range must contain positive increasing meter bounds')
+        self.pc_range = pc_range
+        self.use_3d_bbox = use_3d_bbox
+        self.num_classes = num_classes
+        self.num_bboxes = num_bboxes
+        self.use_semantics = use_semantics
+        self.use_depth = use_depth
+        self.semantic_path = semantic_path
+        self.depth_path = depth_path
+        self.seg_id_remap = seg_id_remap
         self.depth_raw_shape = tuple(depth_raw_shape)
         self.depth_range = tuple(depth_range)
-        if self.use_depth and self.depth_path is None:
-            raise ValueError('Metric3D depth_path is required when use_depth=True')
-        if self.use_semantics and self.semantic_path is None:
-            raise ValueError('semantic_path is required when use_semantics=True')
-        if not self._retain_raw_projection(self.pipeline):
-            raise ValueError('Metric3D dataset requires CustomCollect3D in its pipeline')
-        
+        self.opencv_num_threads = int(opencv_num_threads)
         self.use_semantic_bev_cache = use_semantic_bev_cache
-        self.semantic_bev_cache = None
-        if use_semantic_bev_cache:
-            from .semantic_bev_cache import SemanticBEVCache, cache_contract
-            if not self.use_semantics or semantic_bev_cache_root is None or semantic_bev_cache_projection is None:
-                raise ValueError('Cache mode requires semantics, a cache root and projection settings')
-            contract = cache_contract(semantic_bev_cache_projection, self.depth_raw_shape,
-                                      self.depth_range, self.seg_id_remap, semantic_bev_cache_source_version)
-            self.semantic_bev_cache = SemanticBEVCache(semantic_bev_cache_root, contract,
-                required_tokens=[info['token'] for info in self.data_infos])
+        self.semantic_bev_cache_root = semantic_bev_cache_root
+        self.load_depth_in_cache = bool(load_depth_in_cache)
+        self.load_temporal_depth = bool(load_temporal_depth)
+
+        # Ego-aligned temporal semantic BEV. Off by default: when False nothing
+        # below runs and every emitted key is byte-identical to before.
+        self.use_semantic_temporal = bool(use_semantic_temporal)
+        self._info_by_token = None
+        if self.use_semantic_temporal:
+            # Queue frames are picked at random by prepare_train_data(), so the
+            # rigid transform has to be looked up per token rather than by index.
+            self._info_by_token = {info['token']: info for info in self.data_infos}
+
+        # Change only the in-memory annotation order, before calibration is built.
+        if camera_types is not None:
+            for info in self.data_infos:
+                info['cams'] = {camera: info['cams'][camera] for camera in camera_types}
+
+        # Accept older configs that specify a projector instead of a cache shape.
+        if semantic_bev_cache_shape is None and semantic_bev_cache_projection is not None:
+            projection = semantic_bev_cache_projection
+            semantic_bev_cache_shape = (projection['num_classes'] + 1,
+                                       projection['bev_h'], projection['bev_w'])
+        self.semantic_bev_cache_shape = (tuple(semantic_bev_cache_shape)
+                                        if semantic_bev_cache_shape is not None else None)
+        configure_semantic_type(self, semantic_type, semantic_logcount_scale,
+                                self.use_semantic_bev_cache, semantic_bev_cache_root)
+
+        needs_raw_maps = self.load_depth_in_cache or self.load_temporal_depth or (
+            not self.use_semantic_bev_cache and (self.use_semantics or self.use_depth))
+        
+        if needs_raw_maps and not self._retain_raw_projection(self.pipeline):
+            raise ValueError('Metric3D dataset requires CustomCollect3D to retain raw calibration')
+        if self.load_temporal_depth:
+            self._retain_temporal_pose(self.pipeline)
+
+    def load_semantic_bev(self, token):
+        """Read a cached sample and return the model's semantic input.
+
+        semantic_bev_cache_shape is the share shape [C, H, W]. The stored array is
+        [C, H, W] for the legacy 'share' layout or [2C+1, H, W] for
+        'share+counts+support'; the returned input is [C, H, W] for
+        semantic_type='share' and [2C, H, W] for 'share+logcount'.
+        """
+        from .semantic_bev_cache import split_cache_array
+        from .layout_diffusion.seg_bev_aligner_one_hot_v5 import semantic_input
+
+        path = os.path.join(self.semantic_bev_cache_root, f'{token}.npy')
+        value = np.load(path, allow_pickle=False)
+        layout = getattr(self, 'semantic_bev_cache_layout', 'share')
+        expected_shape = self.semantic_bev_cache_shape
+        if value.ndim != 3 or not np.issubdtype(value.dtype, np.floating):
+            raise ValueError(f'Expected floating semantic BEV [C, H, W] at {path}, '
+                             f'got {value.shape} {value.dtype}')
+        if expected_shape is not None and getattr(self, 'semantic_type', 'share') == 'share':
+            if value.shape == (2 * expected_shape[0] + 1, *expected_shape[1:]):
+                layout = 'share+counts+support'
+        if expected_shape is not None:
+            classes = expected_shape[0]
+        elif layout == 'share':
+            classes = value.shape[0]
+        else:
+            classes = (value.shape[0] - 1) // 2
+        stored_shape = (classes if layout == 'share' else 2 * classes + 1,
+                        *(expected_shape[1:] if expected_shape is not None else value.shape[1:]))
+        if value.shape != stored_shape:
+            raise ValueError(f'Expected floating semantic BEV {stored_shape} at {path}, '
+                             f'got {value.shape} {value.dtype}')
+        share, counts, _ = split_cache_array(value, classes, layout)
+        semantic = semantic_input(share, counts, getattr(self, 'semantic_type', 'share'),
+                                  getattr(self, 'semantic_logcount_scale', 1e5))
+        return np.ascontiguousarray(semantic, dtype=np.float32)
+
+    @staticmethod
+    def lidar2global(info):
+        """4x4 lidar -> global transform for one sample.
+
+        Semantic BEV is cached in each frame's own lidar frame, so fusing frame
+        t-1 into frame t needs
+            T_rel = inv(lidar2global(t)) @ lidar2global(t-1)
+        lidar2ego is NOT constant across the dataset (three sensor calibrations
+        appear across train+val), so it must come from that sample's own info.
+        """
+        ego = np.eye(4, dtype=np.float64)
+        ego[:3, :3] = Quaternion(info['ego2global_rotation']).rotation_matrix
+        ego[:3, 3] = np.asarray(info['ego2global_translation'], dtype=np.float64)
+        lidar = np.eye(4, dtype=np.float64)
+        lidar[:3, :3] = Quaternion(info['lidar2ego_rotation']).rotation_matrix
+        lidar[:3, 3] = np.asarray(info['lidar2ego_translation'], dtype=np.float64)
+        return ego @ lidar
+
+    def _temporal_semantic_bev(self, temporal_metas):
+        """Queue-frame semantic BEV plus what is needed to ego-align it.
+
+        Returns (probabilities [K, C, H, W], lidar2global [K, 4, 4],
+                 timestamp [K], valid [K]).
+        """
+        tokens = [frame['sample_idx'] for frame in temporal_metas]
+        probabilities = np.stack([self.load_semantic_bev(t) for t in tokens])
+        transforms = np.stack([self.lidar2global(self._info_by_token[t]) for t in tokens])
+        timestamps = np.asarray([self._info_by_token[t]['timestamp'] / 1e6 for t in tokens],
+                                dtype=np.float64)
+
+        return probabilities, transforms, timestamps, np.asarray(_last_occurrence_mask(tokens), dtype=bool)
 
     @classmethod
     def _retain_raw_projection(cls, transform):
-        if type(transform).__name__ == 'CustomCollect3D':
-            transform.meta_keys = tuple(transform.meta_keys) + ('metric3d_lidar2img_raw',)
-            return 1
-        children = getattr(transform, 'transforms', ())
-        if isinstance(children, (list, tuple)):
-            return sum(cls._retain_raw_projection(child) for child in children)
-        return cls._retain_raw_projection(children)
+        return _retain_meta_key(transform, 'metric3d_lidar2img_raw')
+
+    @classmethod
+    def _retain_temporal_pose(cls, transform):
+        return _retain_meta_key(transform, 'lidar2global')
 
     def get_data_info(self, index):
         info = super().get_data_info(index)
         if info is not None and 'lidar2img' in info:
             info['metric3d_lidar2img_raw'] = [matrix.copy() for matrix in info['lidar2img']]
+        if info is not None and self.load_temporal_depth:
+            info['lidar2global'] = self.lidar2global(self.data_infos[index])
         return info
 
     @staticmethod
     def _current_metas(raw):
-        while isinstance(raw, DC):
-            raw = raw.data
+        raw = _unwrap_singleton(raw)
         if isinstance(raw, dict) and 'filename' in raw:
             return raw
         if isinstance(raw, dict):
             return CustomNuScenesDiffusionDataset_seg_depth_v2._current_metas(raw[max(raw)])
-        if isinstance(raw, (list, tuple)) and len(raw) == 1:
-            return CustomNuScenesDiffusionDataset_seg_depth_v2._current_metas(raw[0])
+        raise ValueError('Expected temporal training metadata or one test augmentation')
+
+    @staticmethod
+    def _temporal_metas(raw):
+        raw = _unwrap_singleton(raw)
+        if isinstance(raw, dict) and 'filename' in raw:
+            return [raw]
+        if isinstance(raw, dict):
+            return [CustomNuScenesDiffusionDataset_seg_depth_v2._current_metas(
+                raw[index]) for index in sorted(raw)]
         raise ValueError('Expected temporal training metadata or one test augmentation')
 
     def __getitem__(self, idx):
-        # Bypass the DA3 __getitem__: its loaders use a different depth frame.
-        # OPENCV_NUM_THREADS is not honored by all OpenCV builds; configure each worker.
+        # Configure OpenCV in each worker; some builds ignore OPENCV_NUM_THREADS.
         if cv2.getNumThreads() != self.opencv_num_threads:
             cv2.setNumThreads(self.opencv_num_threads)
-        data = CustomNuScenesDataset.__getitem__(self, idx)
-        metas = self._current_metas(data['img_metas'])
+        data = super().__getitem__(idx)
+        temporal_metas = self._temporal_metas(data['img_metas'])
+        metas = temporal_metas[-1]
         if self.use_semantic_bev_cache:
-            probabilities = self.semantic_bev_cache.load(metas['sample_idx'], metas)
+            if self.use_semantic_temporal:
+                probs, mats, stamps, valid = self._temporal_semantic_bev(temporal_metas)
+                data['temporal_semantic_bev'] = DC(torch.from_numpy(probs))
+                data['temporal_lidar2global'] = DC(torch.from_numpy(mats).float())
+                data['temporal_timestamp'] = DC(torch.from_numpy(stamps))
+                data['temporal_semantic_valid'] = DC(torch.from_numpy(valid))
+                # Current frame stays under its original key so the existing
+                # SBAM path is untouched and the two can be ablated separately.
+                probabilities = probs[-1]
+            else:
+                probabilities = self.load_semantic_bev(metas['sample_idx'])
+                
             data['semantic_bev_probabilities'] = DC(torch.from_numpy(probabilities))
-            return data
-        if self.use_semantics:
+            
+        elif self.use_semantics:
             data['seg_maps'] = DC(self.load_segmaps(metas['filename'], metas, self.semantic_path))
-        if self.use_depth:
+        load_depth = self.load_depth_in_cache if self.use_semantic_bev_cache else self.use_depth
+        if self.load_temporal_depth:
+            temporal_depth = torch.stack([
+                self.load_depth_from_filenames(frame['filename'], frame)
+                for frame in temporal_metas])
+            data['temporal_depth_maps'] = DC(temporal_depth)
+            tokens = [frame['sample_idx'] for frame in temporal_metas]
+            data['temporal_valid_mask'] = DC(torch.tensor(_last_occurrence_mask(tokens), dtype=torch.bool))
+            data['depth_maps'] = DC(temporal_depth[-1])
+        elif load_depth:
             data['depth_maps'] = DC(self.load_depth_from_filenames(metas['filename'], metas))
         return data
 
@@ -767,10 +900,6 @@ class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDiffusionDataset
         return os.path.join(root, 'samples', os.path.splitext(rel)[0] + suffix)
 
     def _align_map(self, array, img_metas, view, fill_value):
-        if array.shape != self.depth_raw_shape:
-            raise ValueError(f'Expected raw map shape {self.depth_raw_shape}, got {array.shape}')
-        if 'metric3d_lidar2img_raw' not in img_metas:
-            raise ValueError('Missing raw calibration; use the Metric3D v2 dataset pipeline')
         original = np.asarray(img_metas['metric3d_lidar2img_raw'][view], dtype=np.float64)
         augmented = np.asarray(img_metas['lidar2img'][view], dtype=np.float64)
         transform = augmented @ np.linalg.inv(original)
@@ -779,10 +908,9 @@ class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDiffusionDataset
                 or not np.allclose(transform[2:], np.eye(4)[2:], atol=1e-5)
                 or not np.allclose(transform[:2, 3], 0, atol=1e-5)):
             raise ValueError('Expected image-plane augmentation, not a 3D frame change')
-        content_h, content_w = get_content_shapes(img_metas)[view][:2]
+        # PadMultiViewImage stores the pre-padding size in ori_shape.
+        content_h, content_w = img_metas['ori_shape'][view][:2]
         pad_h, pad_w = img_metas['pad_shape'][view][:2]
-        if content_h > pad_h or content_w > pad_w:
-            raise ValueError('Image content exceeds padded frame')
         aligned = cv2.warpPerspective(
             np.asarray(array, dtype=np.float32), transform[:3, :3],
             (int(content_w), int(content_h)), flags=cv2.INTER_NEAREST,
@@ -794,10 +922,7 @@ class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDiffusionDataset
         maps = []
         for view, filename in enumerate(filenames):
             path = self._map_path(semantic_root, filename, '_mask.bin')
-            raw = np.fromfile(path, dtype=np.int8)
-            if raw.size != int(np.prod(self.depth_raw_shape)):
-                raise ValueError(f'Invalid SAM3 map size at {path}: {raw.size}')
-            raw = raw.reshape(self.depth_raw_shape).astype(np.int16)
+            raw = np.fromfile(path, dtype=np.int8).reshape(self.depth_raw_shape).astype(np.int16)
             remapped = raw.copy()
             for source, target in (self.seg_id_remap or {}).items():
                 remapped[raw == source] = target
@@ -806,12 +931,7 @@ class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDiffusionDataset
         return torch.stack(maps)
 
     def load_depth_from_filenames(self, filenames, img_metas=None):
-        """Load float depth; invalid/out-of-range values become 0, never clipped.
-
-        Without metadata, return raw [V, 900, 1600] maps for inspection.
-        __getitem__ always supplies metadata and returns padded image size.
-        Missing or malformed files raise, avoiding silent empty conditioning.
-        """
+        """Load depth, zero invalid values, and optionally align to the padded image."""
         maps = []
         for view, filename in enumerate(filenames):
             path = self._map_path(self.depth_path, filename, '.npy')
@@ -831,7 +951,241 @@ class CustomNuScenesDiffusionDataset_seg_depth_v2(CustomNuScenesDiffusionDataset
         return torch.stack(maps)
 
 
+def configure_semantic_type(dataset, semantic_type, logcount_scale, use_cache, cache_root,
+                            expected_frame=None):
+    """Set the semantic input type and check it against the cache manifest.
+
+    Mirrors the output_frame check: 'share+logcount' needs a cache built with
+    layout 'share+counts+support'; a legacy share cache is rejected at startup.
+    """
+    from .layout_diffusion.seg_bev_aligner_one_hot_v5 import SEMANTIC_TYPES
+    from .semantic_bev_cache import read_cache_manifest
+
+    if semantic_type not in SEMANTIC_TYPES:
+        raise ValueError(f'semantic_type must be one of {SEMANTIC_TYPES}, got {semantic_type!r}')
+    if not np.isfinite(logcount_scale) or logcount_scale <= 0:
+        raise ValueError('semantic_logcount_scale must be positive and finite')
+    dataset.semantic_type = semantic_type
+    dataset.semantic_logcount_scale = float(logcount_scale)
+    dataset.semantic_bev_cache_layout = 'share'
+    needs_manifest = use_cache and (semantic_type == 'share+logcount' or expected_frame is not None
+                                    or getattr(dataset, 'semantic_bev_cache_shape', None) is None)
+    if not needs_manifest:
+        return
+    contract = read_cache_manifest(cache_root)
+    if contract is not None:
+        dataset.semantic_bev_cache_layout = contract.get('layout', 'share')
+    if expected_frame is not None:
+        if contract is None:
+            raise FileNotFoundError(os.path.join(cache_root, 'manifest.json'))
+        frame = contract['projection'].get('output_frame', 'lidar')
+        if frame != expected_frame:
+            raise ValueError(f'Occupancy semantic cache output frame {frame} differs from '
+                             f'expected {expected_frame}: {os.path.join(cache_root, "manifest.json")}')
+    if semantic_type == 'share+logcount' and dataset.semantic_bev_cache_layout != 'share+counts+support':
+        source = 'no manifest' if contract is None else f'layout {dataset.semantic_bev_cache_layout!r}'
+        raise ValueError(f"semantic_type='share+logcount' needs a cache built with "
+                         f"semantic_bev_cache_layout='share+counts+support', but {cache_root} has "
+                         f'{source}; rebuild it with build_semantic_bev_cache.py')
+
+
 @DATASETS.register_module()
+class ViDARSemanticCacheDataset(CustomNuScenesDiffusionDataset_seg_depth_v2):
+    """Keep the original queue/GT filter, then emit only the current token/cache.
+
+    CustomNuScenesDataset.prepare_train_data still samples the three-frame
+    queue and rejects it if any frame has no valid GT. The ViDAR worker
+    uses the returned current-frame token to read the images with its own
+    native test pipeline.
+    """
+
+    def __init__(self, *args, **kwargs):
+        if not kwargs.get('use_semantic_bev_cache'):
+            raise ValueError('ViDARSemanticCacheDataset requires semantic BEV cache')
+        if kwargs.get('load_depth_in_cache') or kwargs.get('load_temporal_depth'):
+            raise ValueError('Token-only ViDAR dataset cannot load depth maps')
+        super().__init__(*args, **kwargs)
+
+    def union2one(self, queue):
+        # The queue's annotation-based acceptance has already been checked.
+        return queue[-1]
+
+    def __getitem__(self, idx):
+        # Bypass the v2 image/segmentation wrapper while retaining the base
+        # dataset's empty-GT retry and the current frame's cache validation.
+        current = CustomNuScenesDataset.__getitem__(self, idx)
+        token = current['img_metas'].data['sample_idx']
+        probabilities = self.load_semantic_bev(token)
+        return {
+            'sample_token': DC(token, cpu_only=True),
+            'semantic_bev_probabilities': DC(torch.from_numpy(probabilities)),
+        }
+
+
+@DATASETS.register_module()
+class Occ3DDiffusionNuScenesDataset(NuSceneOcc):
+    """Baseline Occ3D queues/GT/metrics plus current-frame Metric3D conditions.
+
+    Reuse the Metric3D readers, but retain NuSceneOcc's data-info, queue and
+    evaluation implementation. Detection-layout inheritance is not involved.
+    """
+    _current_metas = staticmethod(CustomNuScenesDiffusionDataset_seg_depth_v2._current_metas)
+    _map_path = staticmethod(CustomNuScenesDiffusionDataset_seg_depth_v2._map_path)
+    _retain_raw_projection = classmethod(CustomNuScenesDiffusionDataset_seg_depth_v2._retain_raw_projection.__func__)
+    _align_map = CustomNuScenesDiffusionDataset_seg_depth_v2._align_map
+    load_segmaps = CustomNuScenesDiffusionDataset_seg_depth_v2.load_segmaps
+    load_depth_from_filenames = CustomNuScenesDiffusionDataset_seg_depth_v2.load_depth_from_filenames
+    load_semantic_bev = CustomNuScenesDiffusionDataset_seg_depth_v2.load_semantic_bev
+
+    def __init__(self, *args, pc_range=(-40, -40, -1, 40, 40, 5.4),
+                 use_semantics=True, use_depth=True, semantic_path=None, depth_path=None,
+                 seg_id_remap=None, depth_raw_shape=(900, 1600), depth_range=(2.5, 170),
+                 opencv_num_threads=1, use_semantic_bev_cache=False,
+                 semantic_bev_cache_root=None, semantic_bev_cache_shape=(17, 50, 50),
+                 semantic_bev_cache_output_frame=None, semantic_type='share',
+                 semantic_logcount_scale=1e5,
+                 use_3d_bbox=False, num_classes=18, num_bboxes=0, load_annos=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        self.pc_range = tuple(pc_range)
+        self.use_semantics, self.use_depth = use_semantics, use_depth
+        self.semantic_path, self.depth_path = semantic_path, depth_path
+        self.seg_id_remap = seg_id_remap
+        self.depth_raw_shape, self.depth_range = tuple(depth_raw_shape), tuple(depth_range)
+        self.opencv_num_threads = int(opencv_num_threads)
+        if not 0 < self.depth_range[0] < self.depth_range[1]:
+            raise ValueError('depth_range must contain positive increasing meter bounds')
+        self.use_semantic_bev_cache = use_semantic_bev_cache
+        self.semantic_bev_cache_root = semantic_bev_cache_root
+        self.semantic_bev_cache_shape = (tuple(semantic_bev_cache_shape)
+                                         if semantic_bev_cache_shape is not None else None)
+        if semantic_bev_cache_output_frame not in (None, 'lidar', 'ego'):
+            raise ValueError('semantic_bev_cache_output_frame must be lidar, ego, or None')
+        if not self.use_semantic_bev_cache and (self.use_semantics or self.use_depth):
+            if not self._retain_raw_projection(self.pipeline):
+                raise ValueError('Metric3D occupancy dataset requires CustomCollect3D to retain raw calibration')
+        if self.use_semantic_bev_cache and (not use_semantics or semantic_bev_cache_root is None):
+            raise ValueError('Cache mode requires use_semantics=True and semantic_bev_cache_root')
+        configure_semantic_type(self, semantic_type, semantic_logcount_scale,
+                                self.use_semantic_bev_cache, semantic_bev_cache_root,
+                                semantic_bev_cache_output_frame)
+
+    def get_data_info(self, index):
+        info = super().get_data_info(index)
+        if info is not None:
+            if 'occ_gt_path' not in info:
+                raise KeyError('Occ3D temporal annotations must provide occ_gt_path')
+            if 'lidar2img' in info:
+                info['metric3d_lidar2img_raw'] = [matrix.copy() for matrix in info['lidar2img']]
+        return info
+
+    def get_unconditioned_item(self, index):
+        """Used by the offline builder without loading semantic/depth sources."""
+        return super().__getitem__(index)
+
+    def __getitem__(self, index):
+        if cv2.getNumThreads() != self.opencv_num_threads:
+            cv2.setNumThreads(self.opencv_num_threads)
+        data = self.get_unconditioned_item(index)
+        metas = self._current_metas(data['img_metas'])
+        if self.use_semantic_bev_cache:
+            probability = self.load_semantic_bev(metas['sample_idx'])
+            data['semantic_bev_probabilities'] = DC(torch.from_numpy(probability))
+        else:
+            if self.use_semantics:
+                data['seg_maps'] = DC(self.load_segmaps(metas['filename'], metas, self.semantic_path))
+            if self.use_depth:
+                data['depth_maps'] = DC(self.load_depth_from_filenames(metas['filename'], metas))
+        return data
+
+
+@DATASETS.register_module()
+class Occ3DLayoutDiffusionNuScenesDataset(NuSceneOcc):
+    """Occ3D temporal samples augmented with BEVDiffuser GT-layout tokens."""
+
+    def __init__(self, *args, pc_range=(-40, -40, -1.0, 40, 40, 5.4),
+                 use_3d_bbox=True, num_classes=12, num_bboxes=300,
+                 use_layout=True, load_annos=False, layout_pc_range=None, **kwargs):
+        self.pc_range = tuple(pc_range)
+        self.layout_pc_range = tuple(
+            self.pc_range if layout_pc_range is None else layout_pc_range)
+        self.use_3d_bbox = bool(use_3d_bbox)
+        self.num_layout_classes = int(num_classes)
+        self.num_bboxes = int(num_bboxes)
+        self.use_layout = bool(use_layout)
+        self.load_annos = bool(load_annos)
+        if len(self.pc_range) != 6:
+            raise ValueError('pc_range must contain six values')
+        if (len(self.layout_pc_range) != 6 or
+                not np.isfinite(self.layout_pc_range).all() or
+                any(self.layout_pc_range[axis + 3] <= self.layout_pc_range[axis]
+                    for axis in range(3))):
+            raise ValueError('layout_pc_range must have finite increasing XYZ bounds')
+        if self.num_layout_classes < 3:
+            raise ValueError('num_classes must include object, image and null classes')
+        if self.num_bboxes < 1:
+            raise ValueError('num_bboxes must be positive')
+        super().__init__(*args, **kwargs)
+
+    _unwrap_layout_value = staticmethod(_unwrap_singleton)
+
+    def get_data_info(self, index):
+        info = super().get_data_info(index)
+        if info is not None and self.load_annos and 'ann_info' not in info:
+            info['ann_info'] = self.get_ann_info(index)
+        return info
+
+    def normalize_layout_bbox(self, bbox):
+        """Normalize native LiDAR boxes as in the original layout dataset."""
+        bbox = bbox.clone()
+        bounds = self.layout_pc_range
+        bbox[..., 0] = ((bbox[..., 0] - bounds[0])
+                        / (bounds[3] - bounds[0])) - 0.5
+        bbox[..., 1] = ((bbox[..., 1] - bounds[1])
+                        / (bounds[4] - bounds[1])) - 0.5
+        bbox[..., 2] = ((bbox[..., 2] - bounds[2])
+                        / (bounds[5] - bounds[2]))
+        bbox[..., 3] = bbox[..., 3] / (bounds[3] - bounds[0])
+        bbox[..., 4] = bbox[..., 4] / (bounds[4] - bounds[1])
+        bbox[..., 5] = bbox[..., 5] / (bounds[5] - bounds[2])
+        return bbox
+
+    def get_layout_info(self, data):
+        class_ids = self._unwrap_layout_value(data['gt_labels_3d'])
+        gt_bboxes = self._unwrap_layout_value(data['gt_bboxes_3d'])
+
+        layout_classes = torch.full(
+            (self.num_bboxes,), self.num_layout_classes - 1, dtype=torch.long)
+        layout_bboxes = torch.zeros((self.num_bboxes, 9), dtype=torch.float32)
+        layout_valid = torch.zeros((self.num_bboxes,), dtype=torch.float32)
+        layout_classes[0] = self.num_layout_classes - 2
+        layout_bboxes[0] = torch.tensor(
+            [0, 0, 0, 1, 1, 1, 0, 0, 0], dtype=torch.float32)
+        layout_valid[0] = 1.0
+
+        num_valid = min(len(class_ids), len(gt_bboxes), self.num_bboxes - 1)
+        if num_valid:
+            selected_classes = class_ids[:num_valid].long()
+            if (selected_classes.min() < 0
+                    or selected_classes.max() >= self.num_layout_classes - 2):
+                raise ValueError('GT layout class IDs exceed the configured object taxonomy')
+            boxes = self.normalize_layout_bbox(
+                gt_bboxes.tensor[:num_valid, :9].to(dtype=torch.float32))
+            layout_classes[1:1 + num_valid] = selected_classes
+            layout_bboxes[1:1 + num_valid] = boxes
+            layout_valid[1:1 + num_valid] = 1.0
+
+        return dict(
+            layout_obj_classes=DC(layout_classes),
+            layout_obj_bboxes=DC(layout_bboxes),
+            layout_obj_is_valid=DC(layout_valid),
+        )
+
+    def __getitem__(self, index):
+        data = super().__getitem__(index)
+        if self.use_layout:
+            data.update(self.get_layout_info(data))
+        return data
 class CustomNuScenesDiffusionDataset_layout_seg_v1(CustomNuScenesDataset): 
     def __init__(self, pc_range, use_3d_bbox=True, num_classes=18, num_bboxes=300, use_layout=True, use_semantics=True, use_depth=False,
                  semantic_path=None, depth_path=None, seg_class=None, total_class=None, seg_id_remap=None, *args, **kwargs):
@@ -1034,16 +1388,6 @@ class CustomNuScenesDiffusionDataset_layout_seg_v1(CustomNuScenesDataset):
     def load_segmaps(self, filenames, img_metas, semantic_root):
         """Load multi-view segmentation maps (.bin) and apply the same spatial
         transforms as the image pipeline (nearest-neighbor resize then pad).
-
-        Args:
-            filenames:     list[str] — per-camera image paths, e.g.
-                           '.../samples/CAM_FRONT/xxx.jpg'
-            img_metas:     dict — contains
-                             'ori_shape': list of (H, W, C) after scale, before pad
-                             'pad_shape': list of (H, W, C) after pad
-                             ('img_shape' also equals the padded size here)
-            semantic_root: str — root directory for seg maps
-
         Returns:
             LongTensor of shape [V, H_pad, W_pad]
         """

@@ -35,12 +35,13 @@ from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_model
 from mmdet3d.utils import collect_env, get_root_logger
 from mmdet.apis import set_random_seed
+from mmdet.utils import setup_multi_processes
 from mmseg import __version__ as mmseg_version
 
 from mmcv.utils import TORCH_VERSION, digit_version
 # from bevdiffuser import BEVDiffuser
 # from bevdiffuser_dino import BEVDiffuser
-from bevdiffuser_onlyseg import BEVDiffuser
+from bevdiffuser_onlyseg import BEVDiffuser, resolve_unet_checkpoint
 
 
 def parse_args():
@@ -191,13 +192,19 @@ def main():
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
    
-    if args.unet_checkpoint_dir is not None and (osp.isfile(args.unet_checkpoint_dir) or osp.isdir(args.unet_checkpoint_dir)):
-        if cfg.bev_diffuser_cfg:
+    if cfg.get('bev_diffuser_cfg') is not None:
+        # Config merging may produce separate copies of the nested UNet config.
+        # The top-level UNet, including CLI overrides, is the source of truth.
+        cfg.bev_diffuser_cfg.unet_cfg = copy.deepcopy(cfg.unet)
+        if args.unet_checkpoint_dir is not None:
             cfg.bev_diffuser_cfg.unet_checkpoint_dir = args.unet_checkpoint_dir
-    if args.resume_from is not None and osp.isfile(args.resume_from):
-        cfg.resume_from = args.resume_from
-    if args.load_from is not None and osp.isfile(args.load_from):
-        cfg.load_from = args.load_from
+        resolve_unet_checkpoint(cfg.bev_diffuser_cfg.get('unet_checkpoint_dir'))
+    for name in ('resume_from', 'load_from'):
+        path = getattr(args, name)
+        if path is not None:
+            if not osp.isfile(path):
+                raise FileNotFoundError(f'{name}: {path}')
+            cfg[name] = path
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
     else:
@@ -220,10 +227,13 @@ def main():
         print(args.tracker_run_name)
 
     elif args.report_to == "tensorboard":
-        cfg.log_config.hooks.append(
-            dict(type="TensorboardLoggerHook")
-        )
+        if not any(hook['type'] == 'TensorboardLoggerHook' for hook in cfg.log_config.hooks):
+            cfg.log_config.hooks.append(dict(type='TensorboardLoggerHook'))
         print("[tensorboard] logger enabled", args.tracker_run_name)
+
+    # Match train.py: configure DataLoader workers before init_dist can select
+    # spawn (the nuScenes datasets require fork with the current plugin imports).
+    setup_multi_processes(cfg)
 
     # init distributed env first, since logger depends on the dist info.
     if args.launcher == 'none':
@@ -300,6 +310,8 @@ def main():
         # 'class_names': cfg.total_class,
         # 'seg_class': cfg.seg_class
     }
+    # Register the Metric3D/cache dataset explicitly for train and eval builders.
+    from projects.bevdiffuser import data_utils
     datasets = [build_dataset(cfg.data.train,
                               default_args=dataset_default_args)]
     if len(cfg.workflow) == 2:
@@ -332,14 +344,26 @@ def main():
     model_target = None
     bev_diffuser = None
     if cfg.bev_diffuser_cfg is not None:
-        model_target = copy.deepcopy(model)
-        if cfg.load_from:
-            load_checkpoint(model_target, cfg.load_from, map_location='cpu')
-            cfg.load_from = None
-            if cfg.model.get('pretrained', None) is None:
-                cfg.load_from = os.path.join(cfg.info_root,"r101_dcn_fcos3d_pretrain.pth")
-                # for bevformerv2
-                # cfg.load_from = os.path.join(cfg.info_root,"fcos_r50_coco_2mmdet.pth")
+        target_cfg = cfg.get('model_target', None)
+        if target_cfg is not None and target_cfg.get('source') == 'vidar':
+            if cfg.get('load_from', None):
+                raise ValueError('ViDAR Stage 2 uses model_target.checkpoint; --load_from is reserved for the legacy BEVFormer teacher')
+            from BEVFormer.projects.bevdiffuser.analyze.vidar_bev_target import ViDARBEVTarget
+            model_target = ViDARBEVTarget(
+                stage1_config=target_cfg.stage1_config,
+                checkpoint=target_cfg.checkpoint,
+                split=target_cfg.get('split', 'train'),
+                device=torch.device('cuda', torch.cuda.current_device()),
+            )
+        else:
+            model_target = copy.deepcopy(model)
+            if cfg.load_from:
+                load_checkpoint(model_target, cfg.load_from, map_location='cpu')
+                cfg.load_from = None
+                if cfg.model.get('pretrained', None) is None:
+                    cfg.load_from = os.path.join(cfg.info_root,"r101_dcn_fcos3d_pretrain.pth")
+                    # for bevformerv2
+                    # cfg.load_from = os.path.join(cfg.info_root,"fcos_r50_coco_2mmdet.pth")
         model_target.requires_grad_(False)
         bev_diffuser = BEVDiffuser(**cfg.bev_diffuser_cfg)
         bev_diffuser.requires_grad_(False)

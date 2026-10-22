@@ -54,6 +54,11 @@ class Occ3DNuScenesDataset(CustomNuScenesDataset):
         self._occ_current_index = None
         super(Occ3DNuScenesDataset, self).__init__(**kwargs)
 
+        # NuScenesDataset stores this as a dict_keys view, which cannot be
+        # pickled when DataLoader workers are created with the spawn method.
+        self.eval_detection_configs.class_names = list(
+            self.eval_detection_configs.class_names)
+
     def prepare_train_data(self, index):
         """Tag the current frame so history frames skip label loading."""
         self._occ_current_index = index

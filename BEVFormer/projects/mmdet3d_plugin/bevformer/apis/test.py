@@ -9,6 +9,7 @@
 #  Modified by Zhiqi Li
 # ---------------------------------------------
 import os.path as osp
+from contextlib import contextmanager
 import pickle
 import shutil
 import tempfile
@@ -47,79 +48,98 @@ def custom_encode_mask_results(mask_results):
                         dtype='uint8'))[0])  # encoded with RLE
     return [encoded_mask_results]
 
+@contextmanager
+def _test_model_state(model):
+    """Start a fresh temporal sequence and restore the caller's state afterwards."""
+    modes = {module: module.training for module in model.modules()}
+    core = getattr(model, 'module', model)
+    history = getattr(core, 'prev_frame_info', None)
+    try:
+        model.eval()
+        if history is not None:
+            core.prev_frame_info = dict(prev_bev=None, scene_token=None,
+                                       prev_pos=0, prev_angle=0)
+        yield
+    finally:
+        for module, training in modes.items():
+            module.training = training
+        if history is not None:
+            core.prev_frame_info = history
+
+
 def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     """Test model with multiple gpus.
-    This method tests model with multiple gpus and collects the results
-    under two different modes: gpu and cpu modes. By setting 'gpu_collect=True'
-    it encodes results to gpu tensors and use gpu communication for results
-    collection. On cpu mode it saves the results on different gpus to 'tmpdir'
-    and collects them by the rank 0 worker.
+    Results are concatenated in rank order to match the contiguous temporal
+    sampler. Both collection options currently use the file-based CPU collector;
+    gpu_collect=True is retained as a compatible fallback, not a GPU gather.
     Args:
         model (nn.Module): Model to be tested.
         data_loader (nn.Dataloader): Pytorch data loader.
         tmpdir (str): Path of directory to save the temporary results from
             different gpus under cpu mode.
-        gpu_collect (bool): Option to use either gpu or cpu to collect results.
+        gpu_collect (bool): Use the compatible CPU fallback for GPU collection.
     Returns:
         list: The prediction results.
     """
-    model.eval()
-    bbox_results = []
-    mask_results = []
-    dataset = data_loader.dataset
-    rank, world_size = get_dist_info()
-    if rank == 0:
-        prog_bar = mmcv.ProgressBar(len(dataset))
-    time.sleep(2)  # This line can prevent deadlock problem in some cases.
-    have_mask = False
-    for i, data in enumerate(data_loader):
-        with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
-            # encode mask results
-            if isinstance(result, dict):
-                if 'bbox_results' in result.keys():
-                    bbox_result = result['bbox_results']
-                    batch_size = len(result['bbox_results'])
-                    bbox_results.extend(bbox_result)
-                if 'mask_results' in result.keys() and result['mask_results'] is not None:
-                    mask_result = custom_encode_mask_results(result['mask_results'])
-                    mask_results.extend(mask_result)
-                    have_mask = True
-            else:
-                batch_size = len(result)
-                bbox_results.extend(result)
-
-            #if isinstance(result[0], tuple):
-            #    assert False, 'this code is for instance segmentation, which our code will not utilize.'
-            #    result = [(bbox_results, encode_mask_results(mask_results))
-            #              for bbox_results, mask_results in result]
+    with _test_model_state(model):
+        bbox_results = []
+        mask_results = []
+        dataset = data_loader.dataset
+        rank, world_size = get_dist_info()
         if rank == 0:
+            prog_bar = mmcv.ProgressBar(len(dataset))
+        time.sleep(2)  # This line can prevent deadlock problem in some cases.
+        have_mask = False
+        for i, data in enumerate(data_loader):
+            with torch.no_grad():
+                result = model(return_loss=False, rescale=True, **data)
+                # encode mask results
+                if isinstance(result, dict):
+                    if 'bbox_results' in result.keys():
+                        bbox_result = result['bbox_results']
+                        batch_size = len(result['bbox_results'])
+                        bbox_results.extend(bbox_result)
+                    if 'mask_results' in result.keys() and result['mask_results'] is not None:
+                        mask_result = custom_encode_mask_results(result['mask_results'])
+                        mask_results.extend(mask_result)
+                        have_mask = True
+                else:
+                    batch_size = len(result)
+                    bbox_results.extend(result)
+
+                #if isinstance(result[0], tuple):
+                #    assert False, 'this code is for instance segmentation, which our code will not utilize.'
+                #    result = [(bbox_results, encode_mask_results(mask_results))
+                #              for bbox_results, mask_results in result]
+            if rank == 0:
             
-            for _ in range(batch_size * world_size):
-                prog_bar.update()
+                for _ in range(batch_size * world_size):
+                    prog_bar.update()
 
-    # collect results from all ranks
-    if gpu_collect:
-        bbox_results = collect_results_gpu(bbox_results, len(dataset))
-        if have_mask:
-            mask_results = collect_results_gpu(mask_results, len(dataset))
+        # collect results from all ranks
+        if gpu_collect:
+            bbox_results = collect_results_gpu(bbox_results, len(dataset))
+            if have_mask:
+                mask_results = collect_results_gpu(mask_results, len(dataset))
+            else:
+                mask_results = None
         else:
-            mask_results = None
-    else:
-        bbox_results = collect_results_cpu(bbox_results, len(dataset), tmpdir)
-        tmpdir = tmpdir+'_mask' if tmpdir is not None else None
-        if have_mask:
-            mask_results = collect_results_cpu(mask_results, len(dataset), tmpdir)
-        else:
-            mask_results = None
+            bbox_results = collect_results_cpu(bbox_results, len(dataset), tmpdir)
+            tmpdir = tmpdir+'_mask' if tmpdir is not None else None
+            if have_mask:
+                mask_results = collect_results_cpu(mask_results, len(dataset), tmpdir)
+            else:
+                mask_results = None
 
-    if mask_results is None:
-        return bbox_results
-    return {'bbox_results': bbox_results, 'mask_results': mask_results}
+        if mask_results is None:
+            return bbox_results
+        return {'bbox_results': bbox_results, 'mask_results': mask_results}
 
 
 def collect_results_cpu(result_part, size, tmpdir=None):
     rank, world_size = get_dist_info()
+    if world_size == 1:
+        return list(result_part)[:size]
     # create a tmp dir if it is not specified
     if tmpdir is None:
         MAX_LEN = 512
@@ -166,4 +186,6 @@ def collect_results_cpu(result_part, size, tmpdir=None):
 
 
 def collect_results_gpu(result_part, size):
-    collect_results_cpu(result_part, size)
+    # Preserve the contiguous-rank ordering used by our temporal sampler.
+    # This project's GPU option uses the CPU/file collector as its fallback.
+    return collect_results_cpu(result_part, size)

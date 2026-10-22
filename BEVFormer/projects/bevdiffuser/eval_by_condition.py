@@ -21,6 +21,9 @@ Usage:
 """
 
 import argparse
+from collections import Counter
+import csv
+import json
 import os
 import sys
 
@@ -35,6 +38,7 @@ from nuscenes import NuScenes
 
 from projects.mmdet3d_plugin.datasets.nuscnes_eval import (
     NuScenesEval_custom,
+    SCENE_CONDITIONS,
     evaluate_by_scene_condition,
 )
 
@@ -67,24 +71,59 @@ def load_plugin(cfg):
 
 
 def build_test_dataset(cfg, data_root_abs):
-    cfg.data.test.test_mode = True
-    cfg.data.test.load_annos = True
-    # Configs disagree on the data_root prefix ('data/nuscenes/' vs
-    # 'BEVFormer/data/nuscenes/'); force absolute paths so eval works regardless
-    # of which config / CWD is used.
-    cfg.data.test.data_root = data_root_abs
-    cfg.data.test.ann_file = os.path.join(
-        data_root_abs, os.path.basename(cfg.data.test.ann_file)
+    source = cfg.data.test
+    dataset_cfg = dict(
+        type="CustomNuScenesDataset",
+        data_root=data_root_abs,
+        ann_file=os.path.join(data_root_abs, os.path.basename(source.ann_file)),
+        pipeline=[],
+        classes=source.get("classes", cfg.class_names),
+        modality=source.get("modality", cfg.input_modality),
+        test_mode=True,
     )
-    return build_dataset(
-        cfg.data.test,
-        default_args={
-            "pc_range": cfg.point_cloud_range,
-            "use_3d_bbox": cfg.use_3d_bbox,
-            "num_classes": cfg.num_classes,
-            "num_bboxes": cfg.num_bboxes,
-        },
+    for key in ("eval_version", "load_interval"):
+        if key in source:
+            dataset_cfg[key] = source[key]
+    return build_dataset(dataset_cfg)
+
+
+def save_condition_rows(rows, nusc_eval, nusc, config_path, result_path, eval_set, output_dir):
+    tokens = sorted(nusc_eval.all_gt.sample_tokens)
+    sample_scenes = {token: nusc.get("sample", token)["scene_token"] for token in tokens}
+    descriptions = {scene: nusc.get("scene", scene)["description"].lower()
+                    for scene in set(sample_scenes.values())}
+    predicates = {"overall": lambda description: True, **SCENE_CONDITIONS}
+    records = []
+    for condition, num_samples, mean_ap, nds in rows:
+        valid = [token for token in tokens
+                 if predicates[condition](descriptions[sample_scenes[token]])]
+        support = Counter(box.detection_name for token in valid
+                          for box in nusc_eval.all_gt[token])
+        records.append(dict(condition=condition, num_samples=num_samples,
+                            mAP=mean_ap, NDS=nds,
+                            num_scenes=len({sample_scenes[token] for token in valid}),
+                            class_support={name: support[name]
+                                           for name in nusc_eval.cfg.class_names}))
+
+    payload = dict(
+        config_path=config_path, result_path=result_path, eval_set=eval_set,
+        condition_definition={"sunny": "no 'rain' in lowercased scene description",
+                              "rainy": "'rain' in lowercased scene description",
+                              "day": "no 'night' in lowercased scene description",
+                              "night": "'night' in lowercased scene description"},
+        evaluated_tokens=tokens, rows=records,
     )
+    with open(os.path.join(output_dir, "conditions.json"), "x") as stream:
+        json.dump(payload, stream, indent=2)
+    with open(os.path.join(output_dir, "conditions.csv"), "x", newline="") as stream:
+        fields = ["condition", "num_samples", "mAP", "NDS", "num_scenes"]
+        fields += ["gt_count_" + name for name in nusc_eval.cfg.class_names]
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({**{key: record[key] for key in fields[:5]},
+                             **{"gt_count_" + name: count
+                                for name, count in record["class_support"].items()}})
 
 
 def main():
@@ -108,6 +147,11 @@ def main():
 
     dataset = build_test_dataset(cfg, data_root_abs)
 
+    with open(args.result_path) as stream:
+        prediction_tokens = set(json.load(stream)["results"])
+    dataset_tokens = {info["token"] for info in dataset.data_infos}
+    assert prediction_tokens == dataset_tokens, "Prediction tokens differ from evaluation dataset"
+
     nusc = NuScenes(version=dataset.version, dataroot=dataset.data_root, verbose=True)
     eval_set_map = {"v1.0-mini": "mini_val", "v1.0-trainval": "val"}
 
@@ -128,7 +172,9 @@ def main():
         data_infos=dataset.data_infos,
     )
 
-    evaluate_by_scene_condition(nusc_eval, nusc, result_path=args.result_path)
+    rows = evaluate_by_scene_condition(nusc_eval, nusc, result_path=args.result_path)
+    save_condition_rows(rows, nusc_eval, nusc, args.bev_config, args.result_path,
+                        eval_set_map[dataset.version], output_dir)
 
 
 if __name__ == "__main__":

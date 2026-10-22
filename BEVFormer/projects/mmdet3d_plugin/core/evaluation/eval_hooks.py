@@ -90,6 +90,6 @@ class CustomDistEvalHook(BaseDistEvalHook):
 
             key_score = self.evaluate(runner, results)
 
-            if self.save_best:
+            if self.save_best and key_score is not None:
                 self._save_ckpt(runner, key_score)
   

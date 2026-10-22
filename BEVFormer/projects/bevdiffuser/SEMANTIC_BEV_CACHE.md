@@ -1,119 +1,185 @@
-# Local Semantic BEV Probability Cache
+# Semantic BEV Probability Cache
 
-The v5 Metric3D path supports both live projection and a local pre-embedding
-cache. Production defaults remain live until all required train/validation
-tokens have been built and verified.
+The standard Metric3D/v5 detection config reads pre-embedding semantic BEV
+probabilities directly with `np.load(path, allow_pickle=False)`; that legacy
+path does not require a manifest. The Occ3D training dataset checks the
+manifest's output frame when its explicit expected-frame setting is provided;
+the cache root must still be kept distinct.
 
-## What Is Cached
 
-One float32 `[17, 50, 50]` NumPy array per sample token, directly from
-`SegBEVAligner.project_semantics`. No argmax, float16 conversion or additional
-normalization is applied. Unknown cells remain zero; fractional semantic mass
-below one is preserved. Support maps are not needed by training and are not
-cached. Approximately 6 GB is needed for train plus validation, excluding
-filesystem overhead.
+## Occ3D cache
 
-`prob_to_emb`, the learned position embedding, the condition encoder and the
-UNet still run and receive gradients on every training step. No model parameter
-names or shapes are changed. Existing CFG dropout uses zero probabilities for
-the unconditional input; it does not zero the learned embedding.
+Occ3D must use a separate cache because its projector covers
+`[-40, -40, -1.0, 40, 40, 5.4]`, while the detection cache covers
+`[-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]`. Both arrays have shape
+`[17, 50, 50]`, but their cells represent different physical locations and
+the Z filtering performed before XY splatting is irreversible.
 
-## Build and Switch
+The Stage 1 occupancy config
+`projects/configs/bevdiffuser/bev_onlyseg_sam_v2_metric3d_occ.py`
+projects raw LiDAR XYZ into ego coordinates before XYZ clipping and splatting.
+Its new cache is distinct from the historical LiDAR-frame occupancy cache:
 
-The configured persistent location is now
-`BEVFormer/data/semantic_bev_cache/metric3d_v5`, as requested. This directory is
-currently on NFS: it avoids raw-map reads and splatting, but not NFS cache reads.
-The earlier local-SSD timing results used `/tmp` and are not directly transferable
-to this location. For fully local cache I/O, use a local SSD mount or a symlink
-to one; `/tmp` itself may be cleaned on reboot.
+```text
+data/semantic_bev_occ_v2
+```
+
+Its immutable source identifier is
+`semantic_bev_occ_ego`. The resulting manifest must report
+`projection.output_frame=ego`, an ego-calibration geometry digest,
+`projection.pc_range=[-40,-40,-1.0,40,40,5.4]`,
+`projection.bev_h=50`, `projection.bev_w=50`, and
+`projection.num_classes=16`.
+
+The prepared launcher reuses the generic builder. From
+`BEVFormer/projects/bevdiffuser/`:
 
 ```bash
-cd /rhome/hyelin/projects/BEVDiffV2
+bash build_semantic_bev_cache_occ.sh
+```
+
+The launcher defaults to eight visible GPUs (`CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`)
+and maps them to logical `cuda:0` through `cuda:7`. Override
+`CUDA_VISIBLE_DEVICES` with a comma-separated list for fewer physical GPUs;
+the builder always uses the logical indices inside that visibility mask.
+For example, one or two GPUs and a bounded subset:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 bash build_semantic_bev_cache_occ.sh --split train --indices 0 1
+CUDA_VISIBLE_DEVICES=2,5 bash build_semantic_bev_cache_occ.sh --split train --indices 0 1
+bash build_semantic_bev_cache_occ.sh --wait-for-lock
+```
+
+The launcher accepts `PYTHON`, `CONFIG`, `CACHE_ROOT`, `SOURCE_VERSION`,
+`SPLIT`, and `FLUSH_EVERY` environment overrides and forwards additional
+arguments such as `--indices` or `--help`. The coordinator owns the sole root
+lock and cache writer; each worker projects a disjoint assigned index on one
+GPU and returns a CPU array. No `torchrun` or distributed process group is used.
+
+Equivalent direct command from `BEVFormer/projects/bevdiffuser/`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python build_semantic_bev_cache.py \
+  --config ../configs/bevdiffuser/bev_onlyseg_sam_v2_metric3d_occ.py \
+  --cache-root ../../data/semantic_bev_occ_v2 \
+  --source-version semantic_bev_occ_ego \
+  --split all \
+  --device cuda:0 \
+  --flush-every 50
+```
+
+For two or eight GPUs use `--devices cuda:0 cuda:1` or
+`--devices cuda:0 cuda:1 cuda:2 cuda:3 cuda:4 cuda:5 cuda:6 cuda:7`
+instead of `--device cuda:0`, with matching `CUDA_VISIBLE_DEVICES`.
+
+The builder is resumable. It verifies existing entries through the manifest,
+uses an exclusive `.builder.lock`, and refuses a populated cache whose contract
+does not match the occupancy projector. Existing manifest entries skip raw SAM3
+and Metric3D reads. Unmanifested `.npy` files are rejected rather than
+overwritten; inspect/reconcile them manually or use a new root. A changed
+projection/runtime contract or corrupted array also stops the build. The
+builder rejects duplicate dataset tokens or duplicate requested indices rather
+than risk replacing geometry from another frame. The
+coordinator flushes committed entries on failure or interruption after stopping
+workers. Do not point the occupancy config at
+`data/semantic_bev` and do not copy that detection manifest into the new root.
+The manifest is builder provenance and resume bookkeeping. The occupancy config
+checks `projection.output_frame=ego` once at dataset initialization, then uses
+the lightweight NumPy read path with shape and floating-dtype checks. Detection
+reads remain unchanged.
+
+This cache contains float32 `[17, 50, 50]` bilinear-splat semantic mass in the
+ego frame over `[-40, -40, -1.0, 40, 40, 5.4]`. Validation here covers
+manifest contract, geometry and checksums for requested entries; it does not
+establish CUDA parity between GPUs, cache/live numerical equivalence, or a
+downstream occupancy score. The Stage 2 config still points at the historical
+`data/semantic_bev_occ` root and must not be used as evidence for this new
+teacher cache until explicitly updated and validated.
+
+The bounded comparison runner reads exactly the 24 tokens in the selected CSV;
+it never builds the full cache. From any directory:
+
+```bash
+/NHNHOME/data/miniconda3/envs/jhl-bevdiff/bin/python \
+  BEVFormer/projects/bevdiffuser/visualize_occ_semantic_frame_fix.py \
+  --device cpu --threads 2
+```
+
+Run this command from the repository root, or pass absolute script and input
+paths. It writes new token PNGs, After probability arrays, per-frame and pooled
+CSV scores, and runtime/hash provenance under
+`results/analysis/occ_semantic_frame_fix_20261015/`; it rejects pre-existing
+output artifacts. CPU results can differ numerically from the historical CUDA
+cache. The existing Stage 2 teacher and detection/DA3 configs are unchanged.
+
+## Train from existing arrays
+
+
+The default cache root is `BEVFormer/data/semantic_bev`. Each file is named
+`<sample_token>.npy` and contains floating `[17, 50, 50]` probabilities.
+From the repository root:
+
+```bash
 conda activate jhl-bevdiff
-export CACHE_ROOT="$PWD/BEVFormer/data/semantic_bev_cache/metric3d_v5"
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
-CUDA_VISIBLE_DEVICES=4 python -u BEVFormer/projects/bevdiffuser/build_semantic_bev_cache.py \
-  --cache-root "$CACHE_ROOT" --split all --device cuda
+cd BEVFormer/projects/bevdiffuser
+bash train_only_seg_cache.sh
 ```
 
-GPU 4 is an example; choose an available GPU. The builder creates the directory.
-Wait for both train and validation to complete successfully before enabling cache
-mode. Re-run the same build command after interruption to verify/resume entries.
+Cache settings come from
+`projects/configs/bevdiffuser/bev_tiny_onlyseg_sam_v2_metric3d.py`:
+`use_semantic_bev_cache` and `semantic_bev_cache_root` are propagated by the
+config to train/val/test. To select another directory, edit
+`semantic_bev_cache_root` in that config. The script does not override it with
+command-line options or environment variables.
 
-The builder uses the current Metric3D config by default. `--config` selects
-another config. CUDA is required: CPU/GPU projection arithmetic can differ,
-especially with TF32. Use the training environment/GPU type; the manifest records
-PyTorch/CUDA versions and the matmul TF32 setting, including `close_tf32`.
-`--indices 0 1 2 3 4 5 6 7 --split train` builds a small subset;
-it is intentionally insufficient for full training. Re-running the builder
-verifies completed entries and builds missing ones. Only one writer is allowed.
+The config uses `../../data/...` paths relative to
+`BEVFormer/projects/bevdiffuser/`. Run the script and direct Python training,
+evaluation or cache-builder commands using this config from that directory.
 
-If another builder owns `.builder.lock`, the command exits with an explanation
-before importing the model or initializing CUDA. A different GPU does not allow
-concurrent writes to the same root. Prefer letting the existing builder finish.
-To queue a verification/resume run explicitly, add `--wait-for-lock` to the build
-command. The waiting process does not allocate GPU memory and can be cancelled
-with Ctrl+C without stopping the existing builder. After acquiring the lock, it
-verifies completed entries and generates only missing entries.
+## Data flow
 
-On the host, `lslocks -o PID,COMMAND,TYPE,MODE,PATH` can identify the lock owner.
-Do not delete `.builder.lock` while a builder is running: replacing its inode can
-allow two writers to corrupt the manifest. The file can remain after a normal
-exit; the OS releases the lock when the owning process closes it or exits.
+`CustomNuScenesDiffusionDataset_seg_depth_v2` selects the token from the actual
+returned current-frame metadata (including temporal queues and resampled
+training items). It loads the array, checks the configured shape and floating
+dtype, and returns a contiguous float32 tensor as
+`data['semantic_bev_probabilities']`. Missing files and invalid shapes/types
+raise with the offending path; there is no automatic live fallback.
 
-After both splits are complete:
+MMCV collates these tensors into the batch. Training and evaluation pass
+`semantic_prob` with shape `[B, 17, 50, 50]` to the v5 UNet on its input device.
+The cached branch skips raw SAM3/depth loading and geometric projection.
+`prob_to_emb`, learned position embeddings, the condition encoder and the UNet
+continue to train. CFG dropout still supplies zero probabilities for the
+unconditional input. No argmax or extra normalization is applied, so fractional
+semantic mass and zero-valued unknown cells are preserved.
+
+RGB images, annotations and the BEVFormer model are still required. Arrays must
+represent the semantic taxonomy and BEV coordinates used by the experiment;
+loading does not convert caches between different projection methods or apply
+new BEV rotations/flips to them.
+
+## Config and optional offline tools
+
+Dataset settings are `use_semantic_bev_cache`, `semantic_bev_cache_root`, and
+`semantic_bev_cache_shape`. The current config derives the expected shape from
+the aligner class count and BEV dimensions. Older configs with
+`semantic_bev_cache_projection` remain supported for deriving the shape;
+`semantic_bev_cache_source_version` is accepted but unused by dataset reads.
+
+For live projection, set `use_semantic_bev_cache=False` in the config. Live mode retains the SAM3/Metric3D
+source-path and raw-calibration requirements.
+
+Existing `.npy` files need no regeneration or manifest edits. The optional
+`build_semantic_bev_cache.py` writer still uses its own manifest, source version,
+checksums and exclusive lock for build/resume bookkeeping. Those checks are
+separate from training reads. Set `--source-version` on the builder when the
+source maps change; the default is the legacy config value, if present, or
+`sam3_metric3d_v1`. Training configs do not need this metadata.
+`validate_semantic_bev_cache.py` can still compare
+live projection with directly loaded probabilities when raw maps are available.
+
+Regression checks (from `BEVFormer` in the training environment):
 
 ```bash
-USE_SEMANTIC_BEV_CACHE=1 SEMANTIC_BEV_CACHE_ROOT="$CACHE_ROOT" \
-  bash BEVFormer/projects/bevdiffuser/train_only_seg.sh
+PYTHONPATH=. python -m unittest discover -s tests -p 'test_semantic_bev_npy_dataset.py' -v
 ```
-
-Return to live SAM3/Metric3D loading:
-
-```bash
-USE_SEMANTIC_BEV_CACHE=0 bash BEVFormer/projects/bevdiffuser/train_only_seg.sh
-```
-
-With neither environment variable set, the script uses the config's
-`use_semantic_bev_cache` and `semantic_bev_cache_root`. The config propagates
-these values to train/val/test. Environment overrides apply to all three splits.
-Do not change the flag mid-process: stop/restart or resume at a checkpoint.
-The current shell script has its resume option commented out, so these training
-commands start a fresh run. To continue an existing run, set its `RESUME_FROM`
-checkpoint and enable the script's `--resume_from_checkpoint` argument first.
-For a fresh run, choose a distinct `RUN_NAME` to avoid mixing existing outputs.
-Visualization tools intentionally keep raw-map mode because they render depth
-and support as well as probabilities.
-
-## Invalidation and Failure Behavior
-
-- The manifest records projection settings, raw depth shape/range, semantic ID
-  remapping, an explicit source version and conservative preprocessing/projector
-  code hashes. Changing these requires a new cache directory.
-- Treat `semantic_bev_cache_source_version` as immutable. Increment it if SAM3 or
-  Metric3D source contents change, even when file names remain the same. Cache
-  readers deliberately do not stat/open the raw maps to check freshness.
-- Each read verifies sample geometry, float32 shape, finite nonnegative values
-  and the array checksum. Model/dataset projection overrides are checked too.
-- Training initialization rejects missing manifest coverage. Missing/corrupt
-  files and changed per-sample geometry raise errors; there is no live fallback.
-- The current scale/padding geometry is fixed. New stochastic crops/flips/scales
-  need a matching augmentation-aware cache strategy; they must not reuse this
-  single-geometry cache silently.
-- RGB frames, annotations and the frozen BEVFormer teacher are still required.
-  This removes raw SAM3/Metric3D loading and splatting, not all data/model costs.
-
-## Sequential Validation
-
-`validate_semantic_bev_cache.py` supports stages 1, 2 and 4. Stage 1 writes tiny
-live/cached configs for the same samples; stage 2 checks real UNet gradients and
-Accelerator checkpoint resume; stage 4 forbids both raw-map loaders and works
-with unavailable source roots. Run stage 4 under `strace -f -e trace=openat` to
-audit file opens independently.
-
-Use `profile_stage1.py` with `PROFILE_CONFIG` pointing to each tiny config for
-stage 3. It invokes the actual training shell script with a short step limit,
-fresh output directory, fixed seed and no checkpoint writes. Per-rank JSONL
-records include sample tokens, DataLoader wait and synchronized step timings.
-Compare matching tokens, exclude warmup, and report shared-GPU/tiny-hot-subset
-limitations. The user-requested CFG/encoder output comparison is omitted.

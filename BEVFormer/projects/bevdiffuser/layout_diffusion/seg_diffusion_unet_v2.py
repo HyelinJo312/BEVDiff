@@ -124,7 +124,10 @@ class SelfAttnTransformer(nn.Module):
         x = rearrange(x, 'b c h w -> b (h w) c')
         for block in self.transformer_blocks:
             x = block(x)
-        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
+        # contiguous(): the rearranged view has channels_last strides, which makes
+        # cuDNN emit a channels_last proj_out.weight grad and trips DDP's
+        # "Grad strides do not match bucket view strides" warning.
+        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         x = self.proj_out(x)
         return x + x_in
 
@@ -344,7 +347,7 @@ class ResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
-class FDN(nn.Module):
+class SBAM(nn.Module):
     def __init__(self, norm_channels, cond_channels):
         super().__init__()
         self.param_free_norm = normalization(norm_channels)
@@ -382,8 +385,8 @@ class SBAMResBlock(TimestepBlock):
         self.use_conv = use_conv
         self.use_checkpoint = use_checkpoint
 
-        self.norm_0 = FDN(channels, seg_channels)
-        self.norm_1 = FDN(self.out_channels, seg_channels)
+        self.norm_0 = SBAM(channels, seg_channels)
+        self.norm_1 = SBAM(self.out_channels, seg_channels)
 
         self.updown = up or down
 
@@ -450,7 +453,7 @@ class DiffusionUNetModel(nn.Module):
     Seg-only conditional UNet.
 
     Conditioning:
-      - Semantic BEV (Grounded-SAM seg map -> SegBEVAligner) injected via FDN
+      - Semantic BEV (Grounded-SAM seg map -> SegBEVAligner) injected via SBAM
         in EVERY decoder block (SBAMResBlock).
       - No DINO / layout condition. Attention blocks are `SelfAttnTransformer`,
         i.e. pure self-attention with the redundant cross-attention branch removed.
@@ -725,7 +728,7 @@ class DiffusionUNetModel(nn.Module):
                     )
                     ds //= 2
                 block = TimestepEmbedSequential(*layers)
-                block.ctx_ds = ctx_ds  # use pre-upsample ds so FDN gets the matching seg BEV scale
+                block.ctx_ds = ctx_ds  # use pre-upsample ds so SBAM gets the matching seg BEV scale
                 self.output_blocks.append(block)
                 self._feature_size += ch
 
@@ -779,7 +782,7 @@ class DiffusionUNetModel(nn.Module):
         # Middle block
         h = self.middle_block(h, emb)
 
-        # Decoder (FDN semantic BEV conditioning in every block)
+        # Decoder (SBAM semantic BEV conditioning in every block)
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
             seg_bev = self._select_ctx(seg_bev_maps, module)

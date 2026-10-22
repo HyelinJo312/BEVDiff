@@ -1,0 +1,32 @@
+__pycache__/
+*.pyc
+
+# large/generated, not source
+data/
+ckpts/
+results/
+
+# nested external repos (own .git, not part of this repo)
+bevfusion/
+mmdetection3d/
+
+.vscode/
+
+# images and model checkpoints/weights - never upload
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.webp
+*.pth
+*.ckpt
+*.pt
+*.safetensors
+*.bin
+*.onnx
+*.engine
+*.npy
+*.npz

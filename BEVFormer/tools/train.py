@@ -34,6 +34,7 @@ from mmdet3d import __version__ as mmdet3d_version
 from mmdet3d.datasets import build_dataset
 from mmdet3d.models import build_model
 from mmdet3d.utils import collect_env, get_root_logger
+from mmdet.utils import setup_multi_processes
 from mmdet.apis import set_random_seed
 from mmseg import __version__ as mmseg_version
 
@@ -222,6 +223,12 @@ def main():
             dict(type="TensorboardLoggerHook")
         )
         print("[tensorboard] logger enabled", args.tracker_run_name)
+
+    # set multi-process settings. Must run before init_dist, which otherwise
+    # falls back to the `spawn` start method: spawn re-imports the plugin in
+    # every dataloader worker and pickles the dataset, which this codebase
+    # does not support (circular imports, dict_keys in eval_detection_configs).
+    setup_multi_processes(cfg)
 
     # init distributed env first, since logger depends on the dist info.
     if args.launcher == 'none':

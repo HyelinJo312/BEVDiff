@@ -258,8 +258,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=1,
-    workers_per_gpu=4,
+    samples_per_gpu=4,
+    workers_per_gpu=8,
     persistent_workers=True,
     train=dict(
         type=dataset_type,
@@ -318,7 +318,7 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=12)
+checkpoint_config = dict(interval=1, max_keep_ckpts=2)
 
 custom_hooks = [
     dict(type='UpdateTarget', epoch_interval=0)

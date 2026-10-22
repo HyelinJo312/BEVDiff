@@ -116,7 +116,7 @@ model = dict(
     type='DiffBEVFormer',
     use_mgd=True,
     mgd_alpha=100,   
-    mgd_lambda=0.6,  
+    mgd_lambda=0.55,  
     use_grid_mask=True,
     video_test_mode=True,
     pretrained=dict(img='torchvision://resnet50'),
@@ -280,8 +280,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=4,
-    workers_per_gpu=4,
+    samples_per_gpu=8,
+    workers_per_gpu=8,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -334,7 +334,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=6, pipeline=test_pipeline)
+evaluation = dict(interval=12, pipeline=test_pipeline)
 
 runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
 
@@ -345,7 +345,7 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=3)
+checkpoint_config = dict(interval=1, max_keep_ckpts=2)
 
 custom_hooks = [
     dict(type='UpdateTarget', epoch_interval=0)

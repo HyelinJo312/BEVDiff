@@ -88,6 +88,9 @@ def get_bev_model(args):
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
             find_unused_parameters=True)
+        # MMCV 1.x forward accesses this private flag, removed in newer PyTorch.
+        if not hasattr(model, "_use_replicated_tensor_module"):
+            model._use_replicated_tensor_module = False
     model.eval()
     return model
 
@@ -168,3 +171,13 @@ def instantiate_from_config(cfg):
     
     return get_obj_from_str(cfg.type)(**cfg.get("parameters", dict()))
 
+
+def get_bev_model_vidar(args, device, split='train'):
+    """Return a frozen ViDAR BEV proxy in an isolated plugin process.
+
+    The proxy accepts current-frame sample tokens via ``get(tokens, device)``.
+    ViDAR reads its own native-preprocessed images for those tokens; passing
+    BEVFormer-tiny ``batch['img']`` would change the pretrained encoder input.
+    """
+    from BEVFormer.projects.bevdiffuser.analyze.vidar_bev_target import ViDARBEVTarget
+    return ViDARBEVTarget(args.bev_config, args.bev_checkpoint, split=split, device=device)

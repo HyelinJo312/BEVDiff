@@ -25,8 +25,16 @@ import accelerate
 import datasets
 import numpy as np
 import torch
-torch.backends.cudnn.enabled = False
-# torch.backends.cudnn.benchmark = True
+
+# torch.backends.cudnn.enabled = False
+# cuDNN 및 convolution 알고리즘 자동 선택
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
+# FP32 convolution과 행렬 연산에 TF32 사용 허용
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_tf32 = True
+
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
@@ -72,8 +80,6 @@ def train():
     bev_cfg = Config.fromfile(args.bev_config)
     if args.cfg_options is not None:
         bev_cfg.merge_from_dict(args.cfg_options)
-    from projects.bevdiffuser.semantic_bev_cache import validate_cache_config
-    validate_cache_config(bev_cfg)
     
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
@@ -145,7 +151,6 @@ def train():
         return loss
     
     unet = build_unet_v2(bev_cfg.unet)
-    num_fdn = sum(1 for m in unet.modules() if type(m).__name__ == 'BFDNResBlock')
     if args.pretrained_unet_checkpoint is not None and (os.path.isfile(args.pretrained_unet_checkpoint) or os.path.isdir(args.pretrained_unet_checkpoint)):
         unet.from_pretrained(args.pretrained_unet_checkpoint, subfolder="unet")
         # train only the downsample and upsample layers
@@ -153,14 +158,17 @@ def train():
         unet.downsample_blocks.requires_grad_(True)
         unet.upsample_blocks.requires_grad_(True)
 
+    num_fdn = sum(1 for m in unet.modules() if type(m).__name__ == 'SBAMResBlock')
     assert version.parse(accelerate.__version__) >= version.parse("0.16.0"), "accelerate 0.16.0 or above is required"
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
         for model in models:
-            model.save_pretrained(os.path.join(output_dir, "unet"))
+            # save_state runs on every rank; only one rank writes shared weights.
+            if accelerator.is_main_process:
+                model.save_pretrained(os.path.join(output_dir, "unet"))
 
-            # make sure to pop weight so that corresponding model is not saved again
+            # Every rank must pop the weight to disable the default model save.
             weights.pop()
 
     def load_model_hook(models, input_dir):
@@ -305,10 +313,10 @@ def train():
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Is SD21: {is_training_sd21}")
     if hasattr(train_dataset, 'use_semantic_bev_cache'):
-        condition_source = (str(train_dataset.semantic_bev_cache.root)
+        condition_source = (f'NumPy cache: {train_dataset.semantic_bev_cache_root}'
                             if train_dataset.use_semantic_bev_cache else 'live SAM3/Metric3D')
         logger.info(f"  Semantic BEV condition source: {condition_source}")
-    logger.info(f'[UNet] BFDNResBlock count: {num_fdn}')
+    logger.info(f'[UNet] SBAMResBlock count: {num_fdn}')
 
     global_step = 0
     first_epoch = 0
@@ -350,6 +358,9 @@ def train():
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
+        # This MMCV dataloader is not wrapped by accelerator.prepare().
+        if hasattr(train_dataloader.sampler, 'set_epoch'):
+            train_dataloader.sampler.set_epoch(epoch)
         # batch: ['img_metas', 'gt_bboxes_3d', 'gt_labels_3d', 'img', 'layout_obj_classes', 'layout_obj_bboxes', 'layout_obj_is_valid', 'layout_obj_names', 'default_obj_names', 'seg_maps']
         unet.train()
         train_loss = 0.0
@@ -396,18 +407,17 @@ def train():
                 if 'depth_maps' in batch.keys():
                     depth_maps = torch.stack(batch['depth_maps'].data[0], dim=0)
 
-                condition_kwargs = {}
+                cond_kwargs = {}
                 if 'semantic_bev_probabilities' in batch:
-                    probabilities = torch.stack(batch['semantic_bev_probabilities'].data[0], dim=0)
-                    condition_kwargs['semantic_probabilities'] = get_segmaps_cond(probabilities)
+                    semantic_prob = torch.stack(batch['semantic_bev_probabilities'].data[0], dim=0).to(latents.device)
+                    cond_kwargs['semantic_prob'] = get_segmaps_cond(semantic_prob)
                     seg_cond = None
                 else:
                     seg_maps = torch.stack(batch['seg_maps'].data[0], dim=0)
                     seg_cond = get_segmaps_cond(seg_maps)
 
                 # Predict the noise residual and compute loss
-                model_pred = unet(noisy_latents, timesteps, img_metas, seg_cond,
-                                  depth_maps=depth_maps, **condition_kwargs)
+                model_pred = unet(noisy_latents, timesteps, img_metas, seg_cond, depth_maps=depth_maps, **cond_kwargs)
 
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 

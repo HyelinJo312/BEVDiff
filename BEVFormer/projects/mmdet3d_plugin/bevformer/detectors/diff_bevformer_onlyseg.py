@@ -18,6 +18,19 @@ from .bevformer import BEVFormer
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
 
 
+def sample_spatialchannel_keep_mask(x, cell_ratio, channel_ratio):
+    """Keep channels independently within selected BEV cells."""
+    if x.ndim != 4:
+        raise ValueError('MGD input must have shape [B, C, H, W]')
+    for name, ratio in (('cell_ratio', cell_ratio), ('channel_ratio', channel_ratio)):
+        if not 0 <= ratio <= 1:
+            raise ValueError(f'{name} must be between 0 and 1')
+    B, C, H, W = x.shape
+    selected_cells = torch.rand((B, 1, H, W), device=x.device) < cell_ratio
+    selected_channels = torch.rand((B, C, H, W), device=x.device) < channel_ratio
+    return (~(selected_cells & selected_channels)).to(dtype=x.dtype)
+
+
 class BEVDistillProjector(nn.Module):
     def __init__(self, in_ch=256, hidden_ch=256, out_ch=256, groups=32):
         super().__init__()
@@ -56,6 +69,9 @@ class DiffBEVFormerSegV3(BEVFormer):
                  use_mgd=False,
                  mgd_alpha=0.00002,
                  mgd_lambda=0.65,
+                 use_spatialchannel=False,
+                 spatialchannel_cell_ratio=0.8,
+                 spatialchannel_channel_ratio=0.6875,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.use_aux_seg = use_aux_seg
@@ -65,6 +81,13 @@ class DiffBEVFormerSegV3(BEVFormer):
         self.use_mgd = use_mgd
         self.mgd_alpha = mgd_alpha
         self.mgd_lambda = mgd_lambda
+        self.use_spatialchannel = use_spatialchannel
+        self.spatialchannel_cell_ratio = spatialchannel_cell_ratio
+        self.spatialchannel_channel_ratio = spatialchannel_channel_ratio
+        for name, ratio in (('spatialchannel_cell_ratio', spatialchannel_cell_ratio),
+                            ('spatialchannel_channel_ratio', spatialchannel_channel_ratio)):
+            if not 0 <= ratio <= 1:
+                raise ValueError(f'{name} must be between 0 and 1')
         embed_dim = self.pts_bbox_head.embed_dims
 
         if use_aux_seg:
@@ -176,7 +199,15 @@ class DiffBEVFormerSegV3(BEVFormer):
         bev_target = None
         if bev_diffuser:
             assert model_target is not None 
-            bev_target = model_target(return_loss=False, only_bev=True, img=img, img_metas=img_metas).detach()
+            if getattr(model_target, 'is_vidar_target', False):
+                current_frame = img.size(1) - 1
+                tokens = [sample[current_frame]['sample_idx'] for sample in img_metas]
+                with torch.no_grad():
+                    bev_target = model_target.get(tokens, img.device)
+                if bev_target.shape != (img.size(0), 256, 200, 200):
+                    raise ValueError(f'Invalid ViDAR BEV target shape: {tuple(bev_target.shape)}')
+            else:
+                bev_target = model_target(return_loss=False, only_bev=True, img=img, img_metas=img_metas).detach()
             
         len_queue = img.size(1)
         prev_img = img[:, :-1, ...]
@@ -253,23 +284,32 @@ class DiffBEVFormerSegV3(BEVFormer):
                 gradient = torch.autograd.grad(loss, x_in)[0]
                 gradient = gradient.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
                 return gradient
-            
         
-            segmaps = torch.stack(kwargs['seg_maps'], dim=0)
-
+            # Cached semantic BEV probabilities already fold in the Metric3D depth,
+            # so the dataset emits neither seg_maps nor depth_maps in that mode.
+            segmaps = None
             depth_maps = None
-            if 'depth_maps' in kwargs.keys():
-                depth_maps = torch.stack(kwargs['depth_maps'], dim=0)
+            semantic_prob = None
+            if 'semantic_bev_probabilities' in kwargs.keys():
+                semantic_prob = torch.stack(kwargs['semantic_bev_probabilities'], dim=0)
+            else:
+                segmaps = torch.stack(kwargs['seg_maps'], dim=0)
+                if 'depth_maps' in kwargs.keys():
+                    depth_maps = torch.stack(kwargs['depth_maps'], dim=0)
 
-            noisy_bev = bev_target.detach()
-            noisy_bev = noisy_bev.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-            teacher_bev = bev_diffuser(noisy_bev, img_metas, segmaps, depth_maps, grad_fn=get_classifier_gradient)
-            # seg_bev_prob = seg_bev_prob.detach().float()  # (B, num_cls+1, H, W)
-
+            if getattr(model_target, 'is_vidar_target', False):
+                noisy_bev = bev_target
+                with torch.no_grad():
+                    teacher_bev = bev_diffuser(noisy_bev, img_metas, segmaps, depth_maps, semantic_prob=semantic_prob)
+                    teacher_bev = F.adaptive_avg_pool2d(teacher_bev, (self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w))
+            else:
+                noisy_bev = bev_target.detach()
+                noisy_bev = noisy_bev.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
+                teacher_bev = bev_diffuser(noisy_bev, img_metas, segmaps, depth_maps, grad_fn=get_classifier_gradient, semantic_prob=semantic_prob)
+            
             B = bev.shape[0]
             C = bev.shape[-1]
             H, W = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
-            # teacher_bev: (B, C, H, W) — keep 2D for MGD; flatten inline when needed
             student_bev = bev.permute(0, 2, 1).reshape(B, C, H, W).contiguous()  # (B, C, H, W)
 
             if self.use_mgd:
@@ -277,8 +317,13 @@ class DiffBEVFormerSegV3(BEVFormer):
                     preds_S = self.mgd_align(student_bev) 
                 else:
                     preds_S = student_bev
-                mat = torch.rand((B, 1, H, W), device=preds_S.device)
-                mat = torch.where(mat > 1 - self.mgd_lambda, torch.zeros_like(mat), torch.ones_like(mat))
+                if self.use_spatialchannel:
+                    mat = sample_spatialchannel_keep_mask(
+                        preds_S, self.spatialchannel_cell_ratio,
+                        self.spatialchannel_channel_ratio)
+                else:
+                    mat = torch.rand((B, 1, H, W), device=preds_S.device)
+                    mat = torch.where(mat > 1 - self.mgd_lambda, torch.zeros_like(mat), torch.ones_like(mat))
                 new_bev = self.mgd_generation(torch.mul(preds_S, mat))
                 loss_bev = F.mse_loss(new_bev, teacher_bev.detach().float(), reduction='mean')
                 losses['loss_bev'] = loss_bev * self.mgd_alpha

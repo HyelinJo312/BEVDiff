@@ -61,11 +61,11 @@ def parse_args():
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none')
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--local-rank', '--local_rank', dest='local_rank', type=int, default=0)
     parser.add_argument('--autoscale-lr', action='store_true')
-    parser.add_argument('--report_to', default=None)
-    parser.add_argument('--tracker_project_name', default='Occ3D-BEVFormer')
-    parser.add_argument('--tracker_run_name', default=None)
+    parser.add_argument('--report-to', '--report_to', dest='report_to', choices=['tensorboard', 'wandb'], default=None)
+    parser.add_argument('--tracker-project-name', '--tracker_project_name', dest='tracker_project_name', default='Occ3D-BEVFormer')
+    parser.add_argument('--tracker-run-name', '--tracker_run_name', dest='tracker_run_name', default=None)
     args = parser.parse_args()
 
     if 'LOCAL_RANK' not in os.environ:
@@ -201,6 +201,12 @@ def train_occ_model(model,
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
             find_unused_parameters=cfg.get('find_unused_parameters', False))
+        # MMCV 1.x checks this private flag in _run_ddp_forward(), but it was
+        # removed from PyTorch 2.x. Training uses train_step() and bypasses the
+        # check; distributed evaluation calls forward() and therefore needs
+        # the legacy flag to be supplied explicitly.
+        if not hasattr(model, '_use_replicated_tensor_module'):
+            model._use_replicated_tensor_module = False
     else:
         model = MMDataParallel(
             model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)

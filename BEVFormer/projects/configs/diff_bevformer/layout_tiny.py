@@ -170,7 +170,12 @@ model = dict(
                                 type='MSDeformableAttention3D',
                                 embed_dims=_dim_,
                                 num_points=8,
-                                num_levels=_num_levels_),
+                                num_levels=_num_levels_,
+                                # The CUDA op asserts batch % min(batch, im2col_step) == 0,
+                                # where batch is samples_per_gpu * num_cams (6). Keeping this
+                                # above that product makes the assert hold for any batch size;
+                                # it only sets kernel chunking, not the result.
+                                im2col_step=256),
                             embed_dims=_dim_,
                         )
                     ],
@@ -277,8 +282,8 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=4,
-    workers_per_gpu=4,
+    samples_per_gpu=8,
+    workers_per_gpu=8,
     train=dict(
         type=dataset_type,
         data_root=data_root,
@@ -331,7 +336,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=6, pipeline=test_pipeline)
+evaluation = dict(interval=12, pipeline=test_pipeline)
 
 runner = dict(type='DiffEpochBasedRunner', max_epochs=total_epochs)
 
@@ -342,7 +347,7 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=3)
+checkpoint_config = dict(interval=1, max_keep_ckpts=2)
 
 custom_hooks = [
     dict(type='UpdateTarget', epoch_interval=0)
