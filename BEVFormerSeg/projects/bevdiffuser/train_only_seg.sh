@@ -2,7 +2,7 @@
 # Run from BEVFormer/projects/bevdiffuser/. Cache settings come from BEV_CONFIG.
 
 # GPU selection: using GPUs 4-7 (0-3 occupied by other jobs)
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 # ── CPU thread budget ────────────────────────────────────────────────────────
 export OMP_NUM_THREADS=1
@@ -13,23 +13,23 @@ export ACCELERATE_MIXED_PRECISION=no
 
 
 GPUS=4
-PORT=${PORT:-29507}
+PORT=${PORT:-29509}
 
-BEV_CONFIG="../configs/bevdiffuser/bev_tiny_det_semantic_onlyseg_sam_metric3d_logcount.py"
+BEV_CONFIG="../configs/bevdiffuser/bev_tiny_det_semantic_onlyseg_sam_metric3d_v2.py"
 BEV_CHECKPOINT="../../../results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
 PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuserSeg
-RUN_NAME=BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d
+RUN_NAME=BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=3
 
 # allow 500 extra steps to be safe
 MAX_TRAINING_STEPS=50000
 TRAIN_BATCH_SIZE=4
-DATALOADER_NUM_WORKERS=12
+DATALOADER_NUM_WORKERS=8
 GRADIENT_ACCUMMULATION_STEPS=1
 
 # loss and lr settings

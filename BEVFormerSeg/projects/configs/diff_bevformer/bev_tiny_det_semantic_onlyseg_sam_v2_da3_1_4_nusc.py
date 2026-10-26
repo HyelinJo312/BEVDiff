@@ -131,7 +131,7 @@ train_task_decoder = True
 
 # ── Student model (DiffBEVFormerSeg) ─────────────────────────────────────────
 model = dict(
-    type='DiffBEVFormerSegV3',
+    type='DiffBEVFormerMapSeg',
     use_mgd=True,
     mgd_alpha=10,   # reduction='mean' 기준; task_loss(≈16)와 균형 맞춤 (paper 0.00002는 sum/N 기준)
     mgd_lambda=0.6,  # paper detection 권장값

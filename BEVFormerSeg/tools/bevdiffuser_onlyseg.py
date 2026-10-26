@@ -75,8 +75,10 @@ class BEVDiffuser(nn.Module):
             
         if self.denoise_timesteps > 0:
             if semantic_prob is not None:
-                if semantic_prob.ndim != 4 or semantic_prob.shape[1] != 17:
-                    raise ValueError('Expected cached semantic BEV [B, 17, H, W]')
+                channels = self.unet.seg_aligner.input_channels
+                if semantic_prob.ndim != 4 or semantic_prob.shape[1] != channels:
+                    raise ValueError(f'Expected cached semantic BEV [B, {channels}, H, W], '
+                                     f'got {tuple(semantic_prob.shape)}')
                 seg_cond = seg_uncond = None
                 cond_kwargs = dict(semantic_prob=semantic_prob)
                 uncond_kwargs = dict(semantic_prob=torch.zeros_like(semantic_prob))

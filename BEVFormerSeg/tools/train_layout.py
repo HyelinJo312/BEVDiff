@@ -39,6 +39,7 @@ from mmseg import __version__ as mmseg_version
 
 from mmcv.utils import TORCH_VERSION, digit_version
 from bevdiffuser import BEVDiffuser
+from projects.mmdet3d_plugin.bevformer.detectors.diff_bevformer import ImageRenormTarget
 # from bevdiffuser_dino import BEVDiffuser
 # from bevdiffuser_seg import BEVDiffuser
 
@@ -328,9 +329,20 @@ def main():
     model_target = None
     bev_diffuser = None
     if cfg.bev_diffuser_cfg is not None:
-        model_target = copy.deepcopy(model)
+        if cfg.get('model_target', None) is not None:
+            # Target BEV model with its own architecture (e.g. detection BEVFormer-tiny
+            # for a seg student); its weights come only from load_from.
+            if not cfg.load_from:
+                raise FileNotFoundError('cfg.model_target requires an existing --load_from checkpoint')
+            model_target = build_model(cfg.model_target)
+        else:
+            model_target = copy.deepcopy(model)
         if cfg.load_from:
             load_checkpoint(model_target, cfg.load_from, map_location='cpu')
+            if cfg.get('model_target_img_norm_cfg', None) is not None:
+                model_target = ImageRenormTarget(
+                    model_target, cfg.img_norm_cfg, cfg.model_target_img_norm_cfg,
+                    rescale=cfg.get('model_target_img_rescale', 1.0))
             cfg.load_from = None
             if cfg.model.get('pretrained', None) is None:
                 cfg.load_from = os.path.join(cfg.info_root,"r101_dcn_fcos3d_pretrain.pth")

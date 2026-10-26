@@ -298,14 +298,13 @@ class DiffBEVFormerSegV3(BEVFormer):
                     depth_maps = torch.stack(kwargs['depth_maps'], dim=0)
 
             if getattr(model_target, 'is_vidar_target', False):
-                noisy_bev = bev_target
                 with torch.no_grad():
-                    teacher_bev = bev_diffuser(noisy_bev, img_metas, segmaps, depth_maps, semantic_prob=semantic_prob)
+                    teacher_bev = bev_diffuser(bev_target, img_metas, segmaps, depth_maps, semantic_prob=semantic_prob)
                     teacher_bev = F.adaptive_avg_pool2d(teacher_bev, (self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w))
             else:
-                noisy_bev = bev_target.detach()
-                noisy_bev = noisy_bev.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-                teacher_bev = bev_diffuser(noisy_bev, img_metas, segmaps, depth_maps, grad_fn=get_classifier_gradient, semantic_prob=semantic_prob)
+                bev_target = bev_target.detach()
+                bev_target = bev_target.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
+                teacher_bev = bev_diffuser(bev_target, img_metas, segmaps, depth_maps, grad_fn=get_classifier_gradient, semantic_prob=semantic_prob)
             
             B = bev.shape[0]
             C = bev.shape[-1]

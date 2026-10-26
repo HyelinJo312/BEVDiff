@@ -66,17 +66,21 @@ queue_length = 3  # each sequence contains `queue_length` frames.
 num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
-use_semantic_bev_cache = True
 use_semantics = False  # cached semantic BEV replaces raw SAM3 maps
+
 use_depth = False  # Metric3D depth is already included in the shared BEV cache
+use_semantic_bev_cache = True
 metric_depth_range = (2.5, 170.0)
+semantic_bev_cache_root = 'data/semantic_bev'  # 17 classes: 'data/semantic_bev_counts'
+semantic_type = 'share'
+semantic_logcount_scale = 1e5
 
 unet = dict(
-    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v5.DiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v5_4.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
-        use_scale_shift_norm=True,
+        use_scale_shift_norm=True,  # must match the teacher checkpoint (det: True, seg: False)
         use_global_seg=True,  # GAP+MLP global semantics added to time embedding and gates
         in_channels=_dim_,
         out_channels=_dim_,
@@ -107,19 +111,22 @@ unet = dict(
             depth_type='camera_z',  # Metric3D optical-axis depth; ray_distance is also supported
             splat_mode='bilinear',
             pixel_stride=1,
+            semantic_type=semantic_type,
+            logcount_scale=semantic_logcount_scale,
         ),
     ),
 )
+
 
 bev_diffuser_cfg=dict(
     unet_cfg=unet,
     unet_checkpoint_dir=None,
     pretrained_model_name_or_path="stabilityai/stable-diffusion-2-1",
     prediction_type="sample",
-    noise_timesteps=300,
-    denoise_timesteps=300,
+    noise_timesteps=100,
+    denoise_timesteps=100,
     num_inference_steps=5,
-    cfg_scale=4.0,
+    cfg_scale=2.0,
     use_classifier_guidence=False,
 )
 
@@ -136,7 +143,7 @@ find_unused_parameters=False
 train_task_decoder = True
 
 model = dict(
-    type='DiffBEVFormerSegV3',
+    type='DiffBEVFormerMapSeg',
     use_mgd=True,
     mgd_alpha=10,  # current detection MGD starting value; tune for segmentation
     mgd_lambda=0.55,  # current detection MGD starting value
@@ -260,19 +267,22 @@ model = dict(
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 dataset_type = 'CustomNuScenesDiffusionDataset_seg_depth_v2'
-semantic_bev_cache_root = 'data/semantic_bev'
 data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
 
+# seg_id_remap = {17: 2, 18: 2, 19: 17}
 seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
+semantic_num_classes = unet['parameters']['seg_bev_aligner']['num_classes']
 semantic_bev_cache_settings = dict(
     seg_id_remap=seg_id_remap,
     use_semantic_bev_cache=use_semantic_bev_cache,
     semantic_bev_cache_root=semantic_bev_cache_root,
-    semantic_bev_cache_shape=(17, bev_h_, bev_w_),
+    semantic_type=semantic_type,
+    semantic_logcount_scale=semantic_logcount_scale,
+    semantic_bev_cache_shape=(semantic_num_classes + 1, bev_h_, bev_w_),
     semantic_bev_cache_projection=dict(
         bev_h=bev_h_, bev_w=bev_w_, pc_range=point_cloud_range,
-        num_classes=16, sky_as_ignore=True,
+        num_classes=semantic_num_classes, sky_as_ignore=True,
         depth_range=[2.5, 170.0], depth_type='camera_z',
         splat_mode='bilinear', pixel_stride=1, eps=1e-6),
 )
@@ -370,7 +380,7 @@ optimizer = dict(
     lr=4e-4,
     paramwise_cfg=dict(
         custom_keys={
-            'img_backbone': dict(lr_mult=0.1),
+            'img_backbone': dict(lr_mult=0.5),
         }),
     weight_decay=0.01)
 

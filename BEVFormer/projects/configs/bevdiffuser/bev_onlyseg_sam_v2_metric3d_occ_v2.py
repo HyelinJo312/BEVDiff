@@ -55,7 +55,7 @@ semantic_bev_cache_source_version = 'semantic_bev_occ_ego'
 
 # Seg-only UNet with full-resolution local refinement.
 unet = dict(
-    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v5_3.DiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v5_4.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,

@@ -82,15 +82,21 @@ use_semantics = False  # cached semantic BEV replaces raw SAM3 maps
 use_depth = False  # Metric3D depth is already included in the shared BEV cache
 use_semantic_bev_cache = True
 metric_depth_range = (2.5, 170.0)
-semantic_bev_cache_root = '../../data/semantic_bev'
+# Counts cache (layout share+counts+support = [18 share | 18 counts | 1 support]).
+# semantic_type='share' uses only the share (class distribution) channels [:18];
+# set 'share+logcount' to also feed log1p(counts) (see *_logcount.py).
+semantic_bev_cache_root = '../../data/semantic_bev_counts'
+semantic_type = 'share'
+semantic_logcount_scale = 1e5
 
 # Seg-only UNet: no DINO / layout condition.
 unet = dict(
-    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v5.DiffusionUNetModel',
+    type='projects.bevdiffuser.layout_diffusion.seg_diffusion_unet_v5_4.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
         use_scale_shift_norm=True,
+        sbam_use_scale_shift_norm=False,
         use_global_seg=True,  # GAP+MLP global semantics added to time embedding and gates
         in_channels=_dim_,
         out_channels=_dim_,
@@ -121,6 +127,8 @@ unet = dict(
             depth_type='camera_z',  # Metric3D optical-axis depth; ray_distance is also supported
             splat_mode='bilinear',
             pixel_stride=1,
+            semantic_type=semantic_type,
+            logcount_scale=semantic_logcount_scale,
         ),
     ),
 )
@@ -264,6 +272,13 @@ semantic_bev_cache_settings = dict(
     seg_id_remap=seg_id_remap,
     semantic_bev_cache_shape=(unet['parameters']['seg_bev_aligner']['num_classes'] + 1,
                               bev_h_, bev_w_),
+    # Checked against the cache manifest at startup (grid and taxonomy must match).
+    semantic_bev_cache_projection=dict(
+        bev_h=bev_h_, bev_w=bev_w_, pc_range=point_cloud_range,
+        num_classes=unet['parameters']['seg_bev_aligner']['num_classes'],
+        sky_as_ignore=True),
+    semantic_type=semantic_type,
+    semantic_logcount_scale=semantic_logcount_scale,
 )
 
 

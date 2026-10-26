@@ -16,7 +16,7 @@ export ACCELERATE_MIXED_PRECISION=no
 GPUS=4
 PORT=${PORT:-29506}
 
-BEV_CONFIG="../configs/bevdiffuser/bev_onlyseg_sam_v2_metric3d_occ_logcount.py"
+BEV_CONFIG="../configs/bevdiffuser/bev_onlyseg_sam_v2_metric3d_occ_v2.py"
 
 BEV_CHECKPOINT="../../../results/diff_bevformer/occ/baseline/bevformer_base_occ/epoch_24.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
@@ -24,7 +24,7 @@ PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_occ_onlyseg_sam3_metric3d_logcount
+RUN_NAME=BEVDiffuser_occ_onlyseg_sam3_metric3d_v5
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=3
 

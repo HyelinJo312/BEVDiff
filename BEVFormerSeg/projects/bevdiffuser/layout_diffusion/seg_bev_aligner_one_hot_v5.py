@@ -73,16 +73,12 @@ class SegBEVAligner(nn.Module):
         super().__init__()
         if semantic_type not in SEMANTIC_TYPES:
             raise ValueError(f'semantic_type must be one of {SEMANTIC_TYPES}, got {semantic_type!r}')
-        if output_frame not in ('lidar', 'ego'):
-            raise ValueError("output_frame must be 'lidar' or 'ego'")
         if not math.isfinite(logcount_scale) or logcount_scale <= 0:
             raise ValueError('logcount_scale must be positive and finite')
         if len(pc_range) != 6 or any(pc_range[i] >= pc_range[i + 3] for i in range(3)):
             raise ValueError('pc_range must contain increasing XYZ bounds')
         if len(depth_range) != 2 or not 0 < depth_range[0] < depth_range[1]:
             raise ValueError('depth_range must contain positive increasing meter bounds')
-        if not math.isfinite(log_share_eps) or log_share_eps <= 0:
-            raise ValueError('log_share_eps must be positive and finite')
 
         self.bev_h, self.bev_w = bev_h, bev_w
         self.pc_range = tuple(pc_range)
@@ -105,9 +101,10 @@ class SegBEVAligner(nn.Module):
         self._pixel_grid_shape = None
 
         self.prob_to_emb = nn.Sequential(
-            nn.Conv2d(self.input_channels, emb_channels, kernel_size=3, padding=1),
+            # nn.Conv2d(self.input_channels, emb_channels, kernel_size=3, padding=1),
+            nn.Conv2d(self.input_channels, emb_channels, kernel_size=1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(emb_channels, emb_channels, kernel_size=1),
+            # nn.Conv2d(emb_channels, emb_channels, kernel_size=1),
         )
         self.bev_pos_embed = nn.Parameter(torch.zeros(1, emb_channels, bev_h, bev_w))
         nn.init.trunc_normal_(self.bev_pos_embed, std=0.02)
@@ -141,18 +138,7 @@ class SegBEVAligner(nn.Module):
     @torch.no_grad()
     def project_semantics(self, seg_id, img_metas, depth_maps, return_counts=False):
         """Return float32 (semantic mass, support) in BEV for inspection.
-
-        Shapes: [B, C, bev_h, bev_w], [B, 1, bev_h, bev_w]. Each observed
-        camera contributes one normalized histogram at most. Subpixel support
-        below one pixel retains its magnitude; support is sampling mass, not
-        a calibrated depth confidence. Unobserved cells have zero mass.
-        With return_counts=True a third tensor [B, C, bev_h, bev_w] holds the
-        raw per-class pixel mass summed over cameras (before normalization).
         """
-        if depth_maps is None:
-            raise ValueError('Push-style splatting requires metric depth_maps')
-        if seg_id.ndim != 4 or depth_maps.shape != seg_id.shape:
-            raise ValueError('seg_id and depth_maps must have identical [B, V, H, W] shapes')
         B, V, H, W = seg_id.shape
         if len(img_metas) != B:
             raise ValueError('img_metas batch size does not match the maps')
@@ -235,8 +221,6 @@ class SegBEVAligner(nn.Module):
 
     def encode_prob(self, probabilities):
         """Encode the semantic input ([share] or [share, logcount]).
-
-        Optional log-share scaling applies to the share channels only.
         """
         if probabilities.ndim != 4 or probabilities.shape[1] != self.input_channels:
             raise ValueError(
@@ -247,6 +231,7 @@ class SegBEVAligner(nn.Module):
             share = torch.log1p(probabilities[:, :classes].float() / self.log_share_eps)
             share = share / math.log1p(1.0 / self.log_share_eps)
             probabilities = torch.cat([share, probabilities[:, classes:].float()], dim=1)
+            
         seg_bev = self.prob_to_emb(probabilities.to(self.prob_to_emb[0].weight.dtype))
         return self.seg_bev_encoder(seg_bev + self.bev_pos_embed)
 

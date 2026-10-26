@@ -12,6 +12,7 @@ https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_
 '''
 
 import argparse
+from contextlib import contextmanager
 import os, sys
 import time
 from pathlib import Path
@@ -206,7 +207,7 @@ def test():
                                     })
     dataloader = build_dataloader(
         dataset,
-        samples_per_gpu=bev_cfg.data.samples_per_gpu,
+        samples_per_gpu=1,  # BEVFormer temporal evaluation handles one frame per rank.
         workers_per_gpu=bev_cfg.data.workers_per_gpu,
         dist=(args.launcher != 'none'),
         shuffle=False,
@@ -229,7 +230,38 @@ def test():
              use_classifier_guidence=args.use_classifier_guidence,)
 
 
-def evaluate(unet,
+@contextmanager
+def _evaluation_state(unet, bev_model):
+    """Isolate eval mode and temporal history from an ongoing training run.
+
+    BEVFormer keeps the previous frame's BEV in prev_frame_info. During Stage 1
+    training it holds a training-batch BEV, which must not be reused as temporal
+    context for validation frames (or vice versa after evaluation).
+    """
+    modules = {module: module.training for model in (unet, bev_model)
+               for module in model.modules()}
+    core = getattr(bev_model, 'module', bev_model)
+    history = getattr(core, 'prev_frame_info', None)
+    try:
+        unet.eval()
+        bev_model.eval()
+        if history is not None:
+            core.prev_frame_info = dict(prev_bev=None, scene_token=None,
+                                        prev_pos=0, prev_angle=0)
+        yield
+    finally:
+        for module, training in modules.items():
+            module.training = training
+        if history is not None:
+            core.prev_frame_info = history
+
+
+def evaluate(unet, bev_model, *args, **kwargs):
+    with _evaluation_state(unet, bev_model):
+        return _evaluate(unet, bev_model, *args, **kwargs)
+
+
+def _evaluate(unet,
              bev_model,
              noise_scheduler,
              dataset,
@@ -314,10 +346,8 @@ def evaluate(unet,
 
             for _, t in enumerate(noise_scheduler.timesteps): # 5 -> 4 -> 3 -> 2 -> 1
                 t_batch = torch.tensor([t] * latents.shape[0], device=latents.device)
-                noise_pred_uncond = unet(latents, t_batch, img_metas, None,
-                                          seg_bev_maps=seg_bev_uncond)
-                noise_pred_cond = unet(latents, t_batch, img_metas, None,
-                                        seg_bev_maps=seg_bev_cond)
+                noise_pred_uncond = unet(latents, t_batch, img_metas, None, seg_bev_maps=seg_bev_uncond)
+                noise_pred_cond = unet(latents, t_batch, img_metas, None,seg_bev_maps=seg_bev_cond)
                 noise_pred = noise_pred_uncond + 2 * (noise_pred_cond - noise_pred_uncond)
                 classifier_gradient = get_classifier_gradient(latents, **batch) if use_classifier_guidence else None
                 latents = noise_scheduler.step(noise_pred, t, latents, return_dict=False, classifier_gradient=classifier_gradient)[0]

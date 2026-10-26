@@ -20,9 +20,6 @@ plugin_dir = 'projects/mmdet3d_plugin/'
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 
-
-
-
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
@@ -31,6 +28,10 @@ class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
+# SAM3 raw seg-id -> model taxonomy remap
+#   crosswalk(16)/lane(17)/road arrow(18) -> road(2)
+#   sky(19) -> 16
+seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
 
 input_modality = dict(
     use_lidar=False,
@@ -50,22 +51,25 @@ queue_length = 3 # each sequence contains `queue_length` frames.
 num_bboxes = 300
 num_classes = len(class_names) + 2
 use_3d_bbox = True
-use_layout = True
 use_semantics = True
 
+use_depth = True  # Metric3D raw metric depth for semantic surface splatting
+metric_depth_range = (2.5, 170.0)
+use_semantic_bev_cache = True
+semantic_bev_cache_root = '../../data/semantic_bev'
+
+# Seg-only UNet with encoder SBAM and global semantic attention pooling.
 unet = dict(
-    # type='layout_diffusion.layout_dino_diffusion_unet.LayoutDiffusionUNetModel',
-    type='layout_diffusion.layout_dino_diffusion_unet_v3.LayoutDiffusionUNetModel',
+    type='layout_diffusion.seg_diffusion_unet_v5_5.DiffusionUNetModel',
     parameters=dict(
         image_size=bev_h_,
         use_fp16=False,
         use_scale_shift_norm=True,
-        return_multiscale=False,
+        sbam_use_scale_shift_norm=False,
         in_channels=_dim_,
         out_channels=_dim_,
+        seg_channels=[256, 256, 256],
         model_channels=256,
-        context_dim=256,  # 768 (original DINOv2)
-        encoder_channels=256, # assert same as layout_encoder.hidden_dim
         num_head_channels=32,
         num_heads=-1,
         num_heads_upsample=-1,
@@ -78,51 +82,23 @@ unet = dict(
         channel_mult=[ 1, 2, 4 ],
         dropout=0.0,
         use_checkpoint=False,
-        use_positional_embedding_for_attention=True,
-        attention_block_type='ObjectAwareCrossAttention',
-        dino_bev_aligner=dict(
-            bev_h=bev_h_,
-            bev_w=bev_w_,
-            cam_view=6,
-            pc_range=point_cloud_range,
-            num_points_in_pillar=4,
-            c_dino=768,                 # DINO feature dim
-            c_ctx=256,                  # output channels
-            channel_mult=[1, 2, 4],
-            return_multiscale=False,
-        ),
+        # ---- Metric3D semantic surface -> BEV push-style splatting ----
         seg_bev_aligner=dict(
             bev_h=bev_h_,
             bev_w=bev_w_,
-            cam_view=6,
             pc_range=point_cloud_range,
-            num_points_in_pillar=4,
+            sky_as_ignore=True,
             num_classes=16,
-            embed_dim=64,
             emb_channels=256,
-            channel_mult=[1, 2, 4],
-            final_dim=(480, 800),
-            return_multiscale=False,
+            channel_mult=[1, 1, 1],  # keep 256ch at every scale; must match seg_channels above
+            depth_range=metric_depth_range,
+            depth_type='camera_z',  # Metric3D optical-axis depth; ray_distance is also supported
+            splat_mode='bilinear',
+            pixel_stride=1,
         ),
-        layout_encoder=dict(
-            type='layout_diffusion.layout_encoder.LayoutTransformerEncoder',
-            parameters=dict(
-                used_condition_types=['obj_class', 'obj_bbox', 'is_valid_obj'],
-                layout_length=num_bboxes,
-                num_classes_for_layout_object=num_classes,
-                mask_size_for_layout_object=0,
-                hidden_dim=256,
-                output_dim=1024, # model_channels x 4
-                num_layers=6,
-                num_heads=8,
-                use_final_ln=True,
-                use_positional_embedding=False,
-                resolution_to_attention=[12, 25, 50], #[ 8, 16, 32 ],
-                use_key_padding_mask=False,
-                use_3d_bbox=use_3d_bbox),
-            ),
-        ),
+    ),
 )
+
 
 model = dict(
     type='BEVFormer',
@@ -138,7 +114,7 @@ model = dict(
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
         style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')), 
+        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')),
     img_neck=dict(
         type='FPN',
         in_channels=[2048],
@@ -247,10 +223,10 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
-dataset_type = 'CustomNuScenesDiffusionDataset_layout'
+dataset_type = 'CustomNuScenesDiffusionDataset_seg_depth_v2'
 data_root = '../../data/nuscenes/'
-# data_root = 'BEVFormer/data/nuscenes/'
-data_root = '/rhome/hyelin/projects/BEVDiffV2/BEVFormer/data/nuscenes/'
+semantic_root = '../../data/nuscenes_sam3'
+depth_root = '../../data/nuscenes_metric3d'
 file_client_args = dict(backend='disk')
 
 
@@ -287,6 +263,13 @@ test_pipeline = [
         ])
 ]
 
+semantic_bev_cache_settings = dict(
+    use_semantic_bev_cache=use_semantic_bev_cache,
+    semantic_bev_cache_root=semantic_bev_cache_root,
+    semantic_bev_cache_shape=(unet['parameters']['seg_bev_aligner']['num_classes'] + 1,
+                              bev_h_, bev_w_),
+)
+
 data = dict(
     samples_per_gpu=1,
     workers_per_gpu=4,
@@ -294,9 +277,13 @@ data = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
-        use_layout=use_layout,
         use_semantics=use_semantics,
-        semantic_path=data_root + 'nuscenes_semantic',
+        use_depth=use_depth,
+        semantic_path=semantic_root,
+        seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+        depth_path=depth_root,
+        depth_raw_shape=(900, 1600),
+        depth_range=metric_depth_range,
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -306,23 +293,32 @@ data = dict(
         queue_length=queue_length,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
-        box_type_3d='LiDAR'),
+        box_type_3d='LiDAR', **semantic_bev_cache_settings),
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-             use_layout=use_layout,
              use_semantics=use_semantics,
-             semantic_path=data_root + 'nuscenes_semantic_val',
+             use_depth=use_depth,
+             semantic_path=semantic_root,
+             seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+             depth_path=depth_root,
+             depth_raw_shape=(900, 1600),
+             depth_range=metric_depth_range,
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
-             classes=class_names, modality=input_modality, samples_per_gpu=1),
+             classes=class_names, modality=input_modality, samples_per_gpu=1,
+             **semantic_bev_cache_settings),
     test=dict(type=dataset_type,
               data_root=data_root,
               ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
-              use_layout=use_layout,
               use_semantics=use_semantics,
-              semantic_path=data_root + 'nuscenes_semantic_val',
+              use_depth=use_depth,
+              semantic_path=semantic_root,
+              seg_id_remap=seg_id_remap,  # SAM3 raw id -> model taxonomy
+              depth_path=depth_root,
+              depth_raw_shape=(900, 1600),
+              depth_range=metric_depth_range,
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
-              classes=class_names, modality=input_modality),
+              classes=class_names, modality=input_modality, **semantic_bev_cache_settings),
     shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
 )
@@ -345,7 +341,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 total_epochs = 24
-evaluation = dict(interval=1, pipeline=test_pipeline)
+evaluation = dict(interval=12, pipeline=test_pipeline)
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
@@ -356,4 +352,4 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=1)
+checkpoint_config = dict(interval=1, max_keep_ckpts=2)

@@ -12,12 +12,12 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 GPUS=4
 PORT=${PORT:-28507}
-CONFIG="./projects/configs/diff_bevformer/bev_tiny_onlyseg_sam_metric3d_logcount.py"
+CONFIG="./projects/configs/diff_bevformer/bev_tiny_onlyseg_sam_metric3d_v3.py"
 # Matches train_only_seg_cache.sh; override to select an existing earlier checkpoint.
-UNET_CHECKPOINT_DIR="../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_logcount/checkpoint-50000"
+UNET_CHECKPOINT_DIR="../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_v3_scale-shift/checkpoint-50000"
 LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
-RUN_NAME="DiffBEVFormer_tiny_onlyseg_metric3d_logcount_t100_alpha100_lambda0.55"
-WORK_DIR="../results/diff_bevformer"
+RUN_NAME="DiffBEVFormer_tiny_onlyseg_metric3d_no-diffusion"
+WORK_DIR="../results/diff_bevformer/det"
 
 # Keep the existing Stage 2 deterministic setting. Forward every extra argument.
 # Example: --resume_from /path/to/epoch_12.pth

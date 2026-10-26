@@ -24,11 +24,6 @@ SEMANTIC_TYPES = ('share', 'share+logcount')
 
 
 def semantic_input(share, counts=None, semantic_type='share', logcount_scale=1e5):
-    """Build the semantic encoder input from share [..., C, H, W] and raw counts.
-
-    Accepts numpy arrays (dataset side) or tensors (live projection), so the
-    cached and live paths produce identical inputs.
-    """
     if semantic_type == 'share':
         return share
     if semantic_type != 'share+logcount':
@@ -45,15 +40,28 @@ def semantic_input(share, counts=None, semantic_type='share', logcount_scale=1e5
     return torch.cat([share, logcount.to(share.dtype)], dim=-3)
 
 
+class GlobalSemEncoder(nn.Module):
+    """Encode a spatial semantic BEV feature into a global vector."""
+
+    def __init__(self, channels, num_heads=8):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, channels) * channels ** -0.5)
+        self.attention = nn.MultiheadAttention(
+            channels, num_heads, dropout=0.0, batch_first=True)
+        self.proj = nn.Sequential(
+            nn.LayerNorm(channels),
+            nn.Linear(channels, channels),
+            nn.SiLU(),
+        )
+
+    def forward(self, feature):
+        tokens = feature.flatten(2).transpose(1, 2)
+        query = self.query.expand(feature.shape[0], -1, -1)
+        pooled, _ = self.attention(query, tokens, tokens, need_weights=False)
+        return self.proj(pooled[:, 0])
+
+
 class SegBEVAligner(nn.Module):
-    """Push observed semantic surfaces into BEV without learned projection.
-
-    Inputs are aligned, padded [B, V, H, W] maps. Depth is in meters;
-    ``camera_z`` denotes optical-axis depth, ``ray_distance`` Euclidean range
-    from the camera center. ``lidar2img`` must include image augmentation.
-    Unknown cells remain zero before the learned embedding/BEV encoder.
-    """
-
     def __init__(self, bev_h=64, bev_w=64,
                  pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
                  num_classes=16, 
@@ -101,9 +109,10 @@ class SegBEVAligner(nn.Module):
         self._pixel_grid_shape = None
 
         self.prob_to_emb = nn.Sequential(
-            nn.Conv2d(self.input_channels, emb_channels, kernel_size=3, padding=1),
+            # nn.Conv2d(self.input_channels, emb_channels, kernel_size=3, padding=1),
+            nn.Conv2d(self.input_channels, emb_channels, kernel_size=1),
             nn.SiLU(inplace=True),
-            nn.Conv2d(emb_channels, emb_channels, kernel_size=1),
+            # nn.Conv2d(emb_channels, emb_channels, kernel_size=1),
         )
         self.bev_pos_embed = nn.Parameter(torch.zeros(1, emb_channels, bev_h, bev_w))
         nn.init.trunc_normal_(self.bev_pos_embed, std=0.02)

@@ -52,11 +52,12 @@
             //"module": "torch.distributed.launch",
             //"justMyCode": true,
             "program": "${workspaceFolder}/BEVFormerSeg/projects/bevdiffuser/train_bev_diffuser_only_seg.py",
-            "cwd": "${workspaceFolder}/BEVFormer/projects/bevdiffuser",
+            "cwd": "${workspaceFolder}/BEVFormerSeg/projects/bevdiffuser",
             "console": "integratedTerminal",
             "args": [
                 "--bev_config", "${workspaceFolder}/BEVFormerSeg/projects/configs/bevdiffuser/bev_tiny_det_semantic_onlyseg_sam_metric3d.py",
-                "--bev_checkpoint", "${workspaceFolder}/BEVFormer/ckpts/bevformer_tiny_epoch_24.pth",
+                // BEV segmentation baseline (seg head), as in train_only_seg.sh.
+                "--bev_checkpoint", "${workspaceFolder}/results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth",
                 // Fresh training: omit --pretrained_unet_checkpoint.
                 "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-2-1",
                 "--train_batch_size", "1",
@@ -77,8 +78,8 @@
             ],
 
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${workspaceFolder}/BEVFormerSeg",
+                "CUDA_VISIBLE_DEVICES": "4",
                 "RANK": "0",
                 "LOCAL_RANK": "0",
                 "WORLD_SIZE": "1",

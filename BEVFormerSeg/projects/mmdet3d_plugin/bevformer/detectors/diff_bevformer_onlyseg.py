@@ -31,7 +31,7 @@ def sample_spatialchannel_keep_mask(x, cell_ratio, channel_ratio):
 
 
 @DETECTORS.register_module()
-class DiffBEVFormerSegV3(BEVFormer):
+class DiffBEVFormerMapSeg(BEVFormer):
     def __init__(self, *args,
                  use_mgd=False,
                  mgd_alpha=100,
@@ -122,6 +122,22 @@ class DiffBEVFormerSegV3(BEVFormer):
         losses.update(losses_pts)
         return losses
 
+    def run_teacher(self, bev_diffuser, noisy_bev, img_metas, grad_fn, **kwargs):
+        """Denoise the frozen target BEV with the semantic-prior teacher."""
+        segmaps = None
+        depth_maps = None
+        semantic_prob = None
+        if 'semantic_bev_probabilities' in kwargs:
+            semantic_prob = torch.stack(kwargs['semantic_bev_probabilities'], dim=0).to(device=noisy_bev.device, dtype=torch.float32)
+            expected_shape = (noisy_bev.shape[0], bev_diffuser.unet.seg_aligner.input_channels,
+                              self.pts_bbox_head.bev_h,
+                              self.pts_bbox_head.bev_w)
+        else:
+            segmaps = torch.stack(kwargs['seg_maps'], dim=0)
+            if 'depth_maps' in kwargs:
+                depth_maps = torch.stack(kwargs['depth_maps'], dim=0)
+        return bev_diffuser(noisy_bev, img_metas, segmaps, depth_maps, grad_fn=grad_fn, semantic_prob=semantic_prob)
+
     def forward_pts_train(self,
                           pts_feats,
                           gt_bboxes_3d,
@@ -183,24 +199,10 @@ class DiffBEVFormerSegV3(BEVFormer):
                 return gradient
 
 
-            segmaps = None
-            depth_maps = None
-            semantic_prob = None
-            if 'semantic_bev_probabilities' in kwargs:
-                semantic_prob = torch.stack(kwargs['semantic_bev_probabilities'], dim=0).to(device=bev_target.device, dtype=torch.float32)
-                expected_shape = (bev_target.shape[0], 17,
-                                  self.pts_bbox_head.bev_h,
-                                  self.pts_bbox_head.bev_w)
-                if tuple(semantic_prob.shape) != expected_shape:
-                    raise ValueError(f'Expected semantic BEV {expected_shape}, got {tuple(semantic_prob.shape)}')
-            else:
-                segmaps = torch.stack(kwargs['seg_maps'], dim=0)
-                if 'depth_maps' in kwargs:
-                    depth_maps = torch.stack(kwargs['depth_maps'], dim=0)
-
             noisy_bev = bev_target.detach()
             noisy_bev = noisy_bev.reshape(-1, self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w, bev.shape[-1]).permute(0, 3, 1, 2)
-            teacher_bev = bev_diffuser(noisy_bev, img_metas, segmaps, depth_maps, grad_fn=get_classifier_gradient, semantic_prob=semantic_prob)
+            teacher_bev = self.run_teacher(bev_diffuser, noisy_bev, img_metas,
+                                           get_classifier_gradient, **kwargs)
             # seg_bev_prob = seg_bev_prob.detach().float()  # (B, num_cls+1, H, W)
 
             B = bev.shape[0]
@@ -211,7 +213,6 @@ class DiffBEVFormerSegV3(BEVFormer):
             if teacher_bev.shape != student_bev.shape:
                 raise ValueError(f'Student/teacher BEV shape mismatch: '
                                  f'{tuple(student_bev.shape)} vs {tuple(teacher_bev.shape)}')
-
 
             if self.use_mgd:
                 if self.mgd_align is not None:

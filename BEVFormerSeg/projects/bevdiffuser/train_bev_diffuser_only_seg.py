@@ -244,7 +244,7 @@ def train():
     
     val_dataloader = build_dataloader(
         val_dataset,
-        samples_per_gpu=bev_cfg.data.samples_per_gpu,
+        samples_per_gpu=1,  # BEVFormer temporal evaluation handles one frame per rank.
         workers_per_gpu=bev_cfg.data.workers_per_gpu,
         dist=(args.launcher != 'none'),
         shuffle=False,
