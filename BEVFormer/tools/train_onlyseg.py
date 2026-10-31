@@ -53,6 +53,9 @@ def parse_args():
     parser.add_argument(
         '--load_from', help='the checkpoint file to load from')
     parser.add_argument(
+        '--no-model-target', '--no_model_target', action='store_true',
+        help='Skip the frozen BEV encoder for student-input distillation.')
+    parser.add_argument(
         '--resume_from', help='the checkpoint file to resume from')
     parser.add_argument(
         '--no-validate',
@@ -135,12 +138,52 @@ def parse_args():
     return args
 
 
+def build_frozen_teacher(cfg, model):
+    """Build the diffuser and optional frozen BEV encoder."""
+    model_target = None
+    bev_diffuser = None
+    if cfg.bev_diffuser_cfg is not None:
+        target_cfg = cfg.get('model_target', None)
+        if cfg.get('no_model_target', False):
+            if cfg.bev_diffuser_cfg.get('use_classifier_guidence', False):
+                raise ValueError('--no-model-target requires use_classifier_guidence=False')
+            # load_from belongs to the frozen encoder, not the student.
+            cfg.load_from = None
+        elif target_cfg is not None and target_cfg.get('source') == 'vidar':
+            if cfg.get('load_from', None):
+                raise ValueError('ViDAR Stage 2 uses model_target.checkpoint; --load_from is reserved for the legacy BEVFormer teacher')
+            from BEVFormer.projects.bevdiffuser.analyze.vidar_bev_target import ViDARBEVTarget
+            model_target = ViDARBEVTarget(
+                stage1_config=target_cfg.stage1_config,
+                checkpoint=target_cfg.checkpoint,
+                split=target_cfg.get('split', 'train'),
+                device=torch.device('cuda', torch.cuda.current_device()),
+            )
+        else:
+            model_target = copy.deepcopy(model)
+            if cfg.load_from:
+                load_checkpoint(model_target, cfg.load_from, map_location='cpu')
+                cfg.load_from = None
+                if cfg.model.get('pretrained', None) is None:
+                    cfg.load_from = os.path.join(cfg.info_root,"r101_dcn_fcos3d_pretrain.pth")
+                    # for bevformerv2
+                    # cfg.load_from = os.path.join(cfg.info_root,"fcos_r50_coco_2mmdet.pth")
+        if model_target is not None:
+            model_target.requires_grad_(False)
+        bev_diffuser = BEVDiffuser(**cfg.bev_diffuser_cfg)
+        bev_diffuser.requires_grad_(False)
+    return model_target, bev_diffuser
+
+
 def main():
     args = parse_args()
 
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+    cfg.no_model_target = args.no_model_target or cfg.get('no_model_target', False)
+    if cfg.no_model_target:
+        cfg.load_from = None
     # import modules from string list.
     if cfg.get('custom_imports', None):
         from mmcv.utils import import_modules_from_strings
@@ -200,6 +243,8 @@ def main():
             cfg.bev_diffuser_cfg.unet_checkpoint_dir = args.unet_checkpoint_dir
         resolve_unet_checkpoint(cfg.bev_diffuser_cfg.get('unet_checkpoint_dir'))
     for name in ('resume_from', 'load_from'):
+        if name == 'load_from' and cfg.no_model_target:
+            continue
         path = getattr(args, name)
         if path is not None:
             if not osp.isfile(path):
@@ -341,33 +386,8 @@ def main():
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
     
-    model_target = None
-    bev_diffuser = None
-    if cfg.bev_diffuser_cfg is not None:
-        target_cfg = cfg.get('model_target', None)
-        if target_cfg is not None and target_cfg.get('source') == 'vidar':
-            if cfg.get('load_from', None):
-                raise ValueError('ViDAR Stage 2 uses model_target.checkpoint; --load_from is reserved for the legacy BEVFormer teacher')
-            from BEVFormer.projects.bevdiffuser.analyze.vidar_bev_target import ViDARBEVTarget
-            model_target = ViDARBEVTarget(
-                stage1_config=target_cfg.stage1_config,
-                checkpoint=target_cfg.checkpoint,
-                split=target_cfg.get('split', 'train'),
-                device=torch.device('cuda', torch.cuda.current_device()),
-            )
-        else:
-            model_target = copy.deepcopy(model)
-            if cfg.load_from:
-                load_checkpoint(model_target, cfg.load_from, map_location='cpu')
-                cfg.load_from = None
-                if cfg.model.get('pretrained', None) is None:
-                    cfg.load_from = os.path.join(cfg.info_root,"r101_dcn_fcos3d_pretrain.pth")
-                    # for bevformerv2
-                    # cfg.load_from = os.path.join(cfg.info_root,"fcos_r50_coco_2mmdet.pth")
-        model_target.requires_grad_(False)
-        bev_diffuser = BEVDiffuser(**cfg.bev_diffuser_cfg)
-        bev_diffuser.requires_grad_(False)
-        
+    model_target, bev_diffuser = build_frozen_teacher(cfg, model)
+
     custom_train_model(
         model,
         datasets,

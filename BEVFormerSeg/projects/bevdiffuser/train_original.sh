@@ -1,27 +1,35 @@
 #!/usr/bin/env bash
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export HF_HUB_OFFLINE=1
+
+# ── CPU thread budget ────────────────────────────────────────────────────────
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export ACCELERATE_MIXED_PRECISION=no
 
 GPUS=4
 PORT=${PORT:-29503}
 
-BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
-BEV_CHECKPOINT="../../ckpts/bevformer_tiny_epoch_24.pth"
+BEV_CONFIG="../configs/bevdiffuser/layout_tiny_mapseg.py"
+BEV_CHECKPOINT="../../../results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth"
 PRETRAINED_MODEL="stabilityai/stable-diffusion-2-1"
 PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
-PROJ_NAME=BEVDiffuser
-RUN_NAME=BEVDiffuser_BEVFormer_tiny_original_bs2
+PROJ_NAME=BEVDiffuserSeg
+RUN_NAME=BEVDiffuserSeg_tiny_original
 
 # checkpoint settings
 CHECKPOINT_STEP=10000
-CHECKPOINT_LIMIT=5
+CHECKPOINT_LIMIT=3
 
 # allow 500 extra steps to be safe
 MAX_TRAINING_STEPS=50000
-TRAIN_BATCH_SIZE=2
-DATALOADER_NUM_WORKERS=4
+TRAIN_BATCH_SIZE=4
+DATALOADER_NUM_WORKERS=8
 GRADIENT_ACCUMMULATION_STEPS=1
 
 # loss and lr settings
@@ -30,32 +38,19 @@ LR_SCHEDULER="constant" # cyclic, cosine, constant
 
 UNCOND_PROB=0.2
 PREDICTION_TYPE="sample" # "sample", "epsilon" or "v_prediction"
-TASK_LOSS_SCALE=0.1 # 0.1
+TASK_LOSS_SCALE=0.1 # seg head loss, as BEVDiffuser uses its task head
 
-OUTPUT_DIR="../../../results/${RUN_NAME}"
+OUTPUT_DIR="../../../results/map_seg/bevdiffuser/${RUN_NAME}"
+
 
 mkdir -p $OUTPUT_DIR
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export NUMEXPR_NUM_THREADS=4
-export OPENBLAS_NUM_THREADS=1     # prevent OpenBLAS from spawning extra threads
-export OPENCV_NUM_THREADS=0       # let OpenCV auto-detect (0 = use OMP setting)
-export MAX_JOBS=8                 # 빌드 job 상한 (과도한 fork 방지)
-export TCNN_CUDA_ARCHITECTURES=86 # Ampere (A6000)
-
-# ── NCCL / inter-GPU communication ──────────────────────────────────────────
-export NCCL_IB_DISABLE=1          # no InfiniBand on this server
-export NCCL_P2P_DISABLE=0         # GPU 0-3: 같은 NUMA node → NODE 토폴로지 P2P 활용
-export NCCL_SOCKET_NTHREADS=4     # NUMA 격리 후 소켓 스레드 복원
-export NCCL_NSOCKS_PERTHREAD=2    # 스레드당 소켓 수
 
 
 # train!
-PYTHONPATH="$(dirname $0)/../..":$PYTHONPATH \
-# python -m torch.distributed.launch --nproc_per_node=$GPUS --master_port=$PORT \
+export PYTHONPATH="$(dirname $0)/../..${PYTHONPATH:+:$PYTHONPATH}"
 taskset -c 16-31,48-63 torchrun \
     --nproc_per_node $GPUS \
-    --master_port=29505 \
+    --master_port=$PORT \
   $(dirname "$0")/train_bev_diffuser.py \
     --bev_config $BEV_CONFIG \
     --bev_checkpoint $BEV_CHECKPOINT \
@@ -75,7 +70,7 @@ taskset -c 16-31,48-63 torchrun \
     --uncond_prob $UNCOND_PROB \
     --prediction_type $PREDICTION_TYPE \
     --task_loss_scale $TASK_LOSS_SCALE \
-    --report_to 'tensorboard' \
-    # --gradient_checkpointing \
+    --report_to 'tensorboard'
+    # --gradient_checkpointing
 
 

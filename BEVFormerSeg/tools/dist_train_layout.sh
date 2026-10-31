@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+export HF_HUB_OFFLINE=1
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export ACCELERATE_MIXED_PRECISION=no
-# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 GPUS=4
 PORT=${PORT:-28509}
 
-CONFIG="./projects/configs/diff_bevformer/bev_tiny_det_semantic_original.py"
-UNET_CHECKPOINT_DIR="../results/bevdiffuser/baseline/BEVDiffuser_BEVFormer_tiny_original_bs4/checkpoint-50000"
-# LOAD_FROM="../results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth"
-LOAD_FROM="../BEVFormer/ckpts/bevformer_tiny_epoch_24.pth"
-RUN_NAME="DiffBEVFormer_tiny_seg_original"
+# BEVDiffuser teacher retrained on the segmentation BEV (Stage 1: projects/bevdiffuser/train_original.sh).
+# x0 comes from the segmentation BEVFormer-tiny, so LOAD_FROM is the seg baseline.
+CONFIG="./projects/configs/diff_bevformer/bev_tiny_det_semantic_original_segteacher.py"
+UNET_CHECKPOINT_DIR="../results/map_seg/bevdiffuser/BEVDiffuserSeg_tiny_original/checkpoint-50000"
+LOAD_FROM="../results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth"
+RUN_NAME="DiffBEVFormer_tiny_seg_original_segteacher"
+
 WORK_DIR="../results/map_seg/diff_bevformer/baseline"
 
 # RESUME_FROM="./results/bevformer_tiny_seg_v2/epoch_12.pth"

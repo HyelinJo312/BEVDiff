@@ -77,7 +77,8 @@ class SegBEVAligner(nn.Module):
                  use_log_share=False,
                  log_share_eps=0.01,
                  semantic_type='share',
-                 logcount_scale=1e5):
+                 logcount_scale=1e5,
+                 use_legacy_prob_embed=False):
         super().__init__()
         if semantic_type not in SEMANTIC_TYPES:
             raise ValueError(f'semantic_type must be one of {SEMANTIC_TYPES}, got {semantic_type!r}')
@@ -108,12 +109,17 @@ class SegBEVAligner(nn.Module):
         self._pixel_grid = None
         self._pixel_grid_shape = None
 
-        self.prob_to_emb = nn.Sequential(
-            # nn.Conv2d(self.input_channels, emb_channels, kernel_size=3, padding=1),
-            nn.Conv2d(self.input_channels, emb_channels, kernel_size=1),
-            nn.SiLU(inplace=True),
-            # nn.Conv2d(emb_channels, emb_channels, kernel_size=1),
-        )
+        if use_legacy_prob_embed:
+            self.prob_to_emb = nn.Sequential(
+                nn.Conv2d(self.input_channels, emb_channels, kernel_size=3, padding=1),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(emb_channels, emb_channels, kernel_size=1),
+            )
+        else:
+            self.prob_to_emb = nn.Sequential(
+                nn.Conv2d(self.input_channels, emb_channels, kernel_size=1),
+                nn.SiLU(inplace=True),
+            )
         self.bev_pos_embed = nn.Parameter(torch.zeros(1, emb_channels, bev_h, bev_w))
         nn.init.trunc_normal_(self.bev_pos_embed, std=0.02)
         self.seg_bev_encoder = SegBEVEncoder(emb_channels, channel_mult=channel_mult)

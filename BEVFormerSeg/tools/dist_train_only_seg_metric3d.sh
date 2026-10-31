@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -13,14 +13,11 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 GPUS=4
 PORT=${PORT:-28505}
-CONFIG="./projects/configs/diff_bevformer/bev_tiny_det_semantic_onlyseg_sam_metric3d.py"
-
+CONFIG="./projects/configs/diff_bevformer/bev_tiny_det_semantic_onlyseg_sam_metric3d_v2.py"
 # UNET_CHECKPOINT_DIR="../results/map_seg/bevdiffuser/BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d/checkpoint-50000"
-UNET_CHECKPOINT_DIR="../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_v3_scale-shift/checkpoint-50000"
-# LOAD_FROM="../results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth"
-LOAD_FROM="../BEVFormer/ckpts/bevformer_tiny_epoch_24.pth"
-
-RUN_NAME="DiffBEVFormer_tiny_onlyseg_metric3d_v3_det_t100_alpha10_lambda0.55"
+UNET_CHECKPOINT_DIR="../results/map_seg/bevdiffuser/BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2_2/checkpoint-50000"
+LOAD_FROM="../results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth"
+RUN_NAME="DiffBEVFormer_tiny_onlyseg_metric3d_v2_2_t100_alpha10_lambda0.55"
 WORK_DIR="../results/map_seg/diff_bevformer"
 
 

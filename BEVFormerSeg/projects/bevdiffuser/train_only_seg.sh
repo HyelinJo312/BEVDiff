@@ -22,7 +22,7 @@ PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuserSeg
-RUN_NAME=BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2
+RUN_NAME=BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2_2
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=3
 

@@ -40,6 +40,8 @@ from mmdet3d.datasets import build_dataset
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))+"/..")
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from projects.mmdet3d_plugin.bevformer.apis.test import custom_encode_mask_results, collect_results_cpu
+from projects.mmdet3d_plugin.metrics import IntersectionOverUnion
+from projects.mmdet3d_plugin.apis.test import SEG_CLASS_NAMES
 from mmdet.apis import set_random_seed
 
 from scheduler_utils import DDIMGuidedScheduler
@@ -186,13 +188,13 @@ def test():
                                     })
     dataloader = build_dataloader(
         dataset,
-        samples_per_gpu=bev_cfg.data.samples_per_gpu,
+        samples_per_gpu=1,  # BEVFormer temporal test keeps prev_frame_info per sample
         workers_per_gpu=bev_cfg.data.workers_per_gpu,
         dist=(args.launcher != 'none'),
         shuffle=False,
         nonshuffler_sampler=bev_cfg.data.nonshuffler_sampler,
     )
-  
+
     save_path = os.path.join('../../test', args.bev_config.split('/')[-1].split('.')[-2], args.checkpoint_dir.split('/')[-2], args.checkpoint_dir.split('/')[-1])
         
     evaluate(unet=unet,
@@ -267,6 +269,7 @@ def evaluate(unet,
     bbox_results = []
     mask_results = []
     have_mask = False
+    seg_iou_metric = None  # created on the first seg_preds (seg-head BEV models)
     
     rank, world_size = get_dist_info()
     if rank == 0:
@@ -320,8 +323,25 @@ def evaluate(unet,
                 have_mask = True
         else:
             batch_size = len(det_result)
-            bbox_results.extend(det_result)
-            
+            seg_logits = det_result[0].get('seg_preds') if (
+                len(det_result) > 0 and isinstance(det_result[0], dict)) else None
+            # Keep one entry per sample for collect_results_cpu, without the large seg_preds.
+            bbox_results.extend([
+                {k: v for k, v in r.items() if k != 'seg_preds'} if isinstance(r, dict) else r
+                for r in det_result])
+            # Segmentation IoU, as in test_bev_diffuser_only_seg.py.
+            if seg_logits is not None and 'semantic_indices' in batch:
+                si = batch['semantic_indices']
+                if hasattr(si, 'data'):
+                    si = si.data[0]
+                    if isinstance(si, list):
+                        si = torch.stack(si, dim=0)
+                else:
+                    si = si[0]
+                if seg_iou_metric is None:
+                    seg_iou_metric = IntersectionOverUnion(seg_logits.shape[1]).to(seg_logits.device)
+                seg_iou_metric.update(seg_logits.argmax(dim=1).int(), si.to(seg_logits.device))
+
         if rank == 0:
             for _ in range(batch_size * world_size):
                 prog_bar.update()
@@ -333,7 +353,10 @@ def evaluate(unet,
         mask_results = None
     
     det_results = bbox_results if mask_results is None else {'bbox_results': bbox_results, 'mask_results': mask_results}
-    
+
+    # Every rank computes; torchmetrics syncs the IoU state across ranks.
+    seg_scores = seg_iou_metric.compute().detach().cpu() if seg_iou_metric is not None else None
+
     key_score = {}
     if rank == 0:
         eval_kwargs = bev_cfg.get('evaluation', {}).copy()
@@ -343,11 +366,28 @@ def evaluate(unet,
         ]:
             eval_kwargs.pop(key, None)
         eval_kwargs['jsonfile_prefix'] = os.path.join(save_path, det_res_path)
-        eval_results = dataset.evaluate(det_results, **eval_kwargs)
-        for metric, score in eval_results.items():
-            if 'mAP' in  metric or 'NDS' in metric:
-                key_score[metric] = score
-    return key_score       
+        has_bbox = isinstance(det_results, dict) or (
+            len(det_results) > 0 and (not isinstance(det_results[0], dict)
+                                      or det_results[0].get('pts_bbox') is not None))
+        if has_bbox:
+            eval_results = dataset.evaluate(det_results, **eval_kwargs)
+            for metric, score in eval_results.items():
+                if 'mAP' in  metric or 'NDS' in metric:
+                    key_score[metric] = score
+        else:
+            print('Skipping detection evaluation: segmentation-only outputs (pts_bbox is None).')
+        if seg_scores is not None:
+            # class 0 is background; mIoU over the foreground classes.
+            fg_scores = seg_scores[1:].tolist()
+            miou = float(sum(fg_scores) / len(fg_scores))
+            names = list(SEG_CLASS_NAMES) if len(fg_scores) == len(SEG_CLASS_NAMES) else \
+                [f'class_{i + 1}' for i in range(len(fg_scores))]
+            print(f'[seg] {det_res_path} | ' + ' | '.join(f'{n} {s:.4f}' for n, s in zip(names, fg_scores))
+                  + f' | mIoU {miou:.4f}', flush=True)
+            key_score['seg_mIoU'] = miou
+            for n, s in zip(names, fg_scores):
+                key_score[f'seg_{n}_IoU'] = float(s)
+    return key_score
   
 
 if __name__ == "__main__":

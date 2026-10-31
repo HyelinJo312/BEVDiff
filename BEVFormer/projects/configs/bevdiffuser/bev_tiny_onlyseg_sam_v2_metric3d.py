@@ -95,6 +95,7 @@ unet = dict(
             depth_type='camera_z',  # Metric3D optical-axis depth; ray_distance is also supported
             splat_mode='bilinear',
             pixel_stride=1,
+            use_legacy_prob_embed=True,
         ),
     ),
 )

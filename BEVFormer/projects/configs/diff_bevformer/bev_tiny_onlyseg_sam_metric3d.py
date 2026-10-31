@@ -96,6 +96,7 @@ unet = dict(
             depth_type='camera_z',  # Metric3D optical-axis depth; ray_distance is also supported
             splat_mode='bilinear',
             pixel_stride=1,
+            use_legacy_prob_embed=True,
         ),
     ),
 )
@@ -128,7 +129,7 @@ model = dict(
     type='DiffBEVFormerSegV3',
     use_mgd=True,
     mgd_alpha=100,   
-    mgd_lambda=0.45,
+    mgd_lambda=0.55,
     use_spatialchannel=False,
     spatialchannel_cell_ratio=0.6,
     spatialchannel_channel_ratio=0.85,  # 0.8 * 0.6875 = 0.55 expected element drop rate

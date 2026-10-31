@@ -24,7 +24,15 @@ import accelerate
 import datasets
 import numpy as np
 import torch
-torch.backends.cudnn.enabled = False
+# torch.backends.cudnn.enabled = False
+# cuDNN 및 convolution 알고리즘 자동 선택
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
+# FP32 convolution과 행렬 연산에 TF32 사용 허용
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_tf32 = True
+
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
@@ -126,13 +134,19 @@ def train():
         
     bev_model = get_bev_model(args)
 
-    # Freeze vae and text_encoder
+    # Freeze the BEV model; with a task loss, train only the head of its task
+    # (as in train_bev_diffuser_only_seg.py), since a seg-only head has no decoder.
     bev_model.requires_grad_(False)
+    bev_head = bev_model.module.pts_bbox_head
+    bev_task = getattr(bev_head, 'task', None) or {'det': True}
     if args.task_loss_scale != 0:
-        bev_model.module.pts_bbox_head.transformer.decoder.requires_grad_(True)
-        bev_model.module.pts_bbox_head.transformer.reference_points.requires_grad_(True)
-        bev_model.module.pts_bbox_head.cls_branches.requires_grad_(True)
-        bev_model.module.pts_bbox_head.reg_branches.requires_grad_(True)
+        if bev_task.get('seg'):
+            bev_head.seg_decoder.requires_grad_(True)
+        if bev_task.get('det'):
+            bev_head.transformer.decoder.requires_grad_(True)
+            bev_head.transformer.reference_points.requires_grad_(True)
+            bev_head.cls_branches.requires_grad_(True)
+            bev_head.reg_branches.requires_grad_(True)
     
     def get_task_loss(x, **kwargs):
         x = x.permute(0, 2, 3, 1).contiguous()
@@ -474,7 +488,10 @@ def train():
                         logger.info(f"Saved state to {save_path}")
                         
                     unet.eval()
-                    if global_step % args.checkpointing_steps == 0:
+                    if global_step % args.checkpointing_steps == 0 and not bev_task.get('det'):
+                        # evaluate() scores 3D boxes only; a seg-only BEV model has none.
+                        logger.info(f"Skipping bbox evaluation at step {global_step}: BEV model has no detection head")
+                    elif global_step % args.checkpointing_steps == 0 and global_step > 40000:
                         logger.info(f"Evaluating at epoch {epoch} step {global_step}")
                         with torch.no_grad():
                             eval_path = os.path.join(save_path, 'val')
