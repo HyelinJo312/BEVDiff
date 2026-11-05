@@ -182,3 +182,8 @@ BEVFormer/tools/*.pdf
 .omc/
 
 /BEVFormerSeg/segmentation_result.json
+
+# Local documents and artifacts
+*.[pP][dD][fF]
+/CVPR2027_submission/
+/BEVDet/ckpts/
