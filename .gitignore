@@ -187,3 +187,7 @@ BEVFormer/tools/*.pdf
 *.[pP][dD][fF]
 /CVPR2027_submission/
 /BEVDet/ckpts/
+# Local documents and artifacts
+*.[pP][dD][fF]
+/CVPR2027_submission/
+/BEVDet/ckpts/
