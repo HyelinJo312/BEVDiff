@@ -21,7 +21,7 @@ RUN_NAME="DiffBEVFormer_tiny_seg_original_segteacher"
 
 WORK_DIR="../results/map_seg/diff_bevformer/baseline"
 
-# RESUME_FROM="./results/bevformer_tiny_seg_v2/epoch_12.pth"
+RESUME_FROM="../results/map_seg/diff_bevformer/baseline/DiffBEVFormer_tiny_seg_original_segteacher/latest.pth"
 
 PYTHON="${PYTHON:-${CONDA_PREFIX:+$CONDA_PREFIX/bin/python}}"
 PYTHON="${PYTHON:-python}"
@@ -30,7 +30,7 @@ if ! "$PYTHON" -c "import mmcv, mmdet3d" >/dev/null 2>&1; then
     exit 1
 fi
 
-"$PYTHON" -m torch.distributed.run --nproc_per_node $GPUS \
+torchrun --nproc_per_node $GPUS \
     --master_port=$PORT \
     "$(dirname "$0")/train_layout.py" $CONFIG \
     --launcher pytorch "$@" \
@@ -40,5 +40,5 @@ fi
     --tracker_project_name='BEVFormerSeg' \
     --tracker_run_name=$RUN_NAME \
     --unet_checkpoint_dir=$UNET_CHECKPOINT_DIR \
-    --load_from=$LOAD_FROM
-    # --resume_from=$RESUME_FROM
+    --load_from=$LOAD_FROM \
+    --resume_from=$RESUME_FROM

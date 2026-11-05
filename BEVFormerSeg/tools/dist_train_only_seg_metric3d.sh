@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
-# export ACCELERATE_MIXED_PRECISION=no
+export ACCELERATE_MIXED_PRECISION=no
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
 
 GPUS=4
-PORT=${PORT:-28505}
+PORT=${PORT:-28503}
 CONFIG="./projects/configs/diff_bevformer/bev_tiny_det_semantic_onlyseg_sam_metric3d_v2.py"
 # UNET_CHECKPOINT_DIR="../results/map_seg/bevdiffuser/BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d/checkpoint-50000"
-UNET_CHECKPOINT_DIR="../results/map_seg/bevdiffuser/BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2_2/checkpoint-50000"
+UNET_CHECKPOINT_DIR="../results/bevdiffuser0/map_seg/BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2_3/checkpoint-50000"
 LOAD_FROM="../results/map_seg/baseline/bevformer_tiny_seg_v3/epoch_24.pth"
-RUN_NAME="DiffBEVFormer_tiny_onlyseg_metric3d_v2_2_t100_alpha10_lambda0.55"
-WORK_DIR="../results/map_seg/diff_bevformer"
+RUN_NAME="DiffBEVFormer_tiny_onlyseg_metric3d_v2_3_t100_alpha10_lambda0.45"
+WORK_DIR="../results/diff_bevformer0/map_seg"
 
+# RESUME_FROM="../results/map_seg/diff_bevformer/DiffBEVFormer_tiny_onlyseg_metric3d_v2_2_t100_alpha10_lambda0.55/epoch_12.pth"
 
 torchrun --nproc_per_node=$GPUS \
     --master_port=$PORT \
@@ -32,3 +33,4 @@ torchrun --nproc_per_node=$GPUS \
     --tracker_run_name=$RUN_NAME \
     --unet_checkpoint_dir=$UNET_CHECKPOINT_DIR \
     --load_from=$LOAD_FROM 
+    # --resume_from=$RESUME_FROM

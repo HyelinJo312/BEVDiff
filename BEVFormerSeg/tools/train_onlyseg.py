@@ -40,6 +40,7 @@ from mmseg import __version__ as mmseg_version
 from mmcv.utils import TORCH_VERSION, digit_version
 
 from bevdiffuser_onlyseg import BEVDiffuser
+from projects.mmdet3d_plugin.bevformer.detectors.diff_bevformer import ImageRenormTarget
 
 
 def parse_args():
@@ -131,6 +132,42 @@ def parse_args():
         args.cfg_options = args.options
 
     return args
+
+
+def build_model_target(cfg, model, logger=None):
+    """Build the frozen BEV model whose features the diffusion teacher denoises.
+
+    cfg.model_target: optional architecture of the --load_from checkpoint, e.g. the
+        detection BEVFormer-tiny for a seg student. It is loaded strictly, so a
+        checkpoint that does not fit fails instead of leaving random weights.
+        Without it, the target is a copy of the student.
+    cfg.model_target_img_norm_cfg: optional normalization the target checkpoint was
+        trained with. The student's images (cfg.img_norm_cfg) are mapped to it by
+        ImageRenormTarget, which also applies cfg.model_target_img_rescale (default 1.0).
+    """
+    explicit = cfg.get('model_target', None) is not None
+    target_norm = cfg.get('model_target_img_norm_cfg', None)
+    rescale = cfg.get('model_target_img_rescale', 1.0)
+    if (explicit or target_norm is not None) and not cfg.load_from:
+        raise FileNotFoundError(
+            'cfg.model_target / cfg.model_target_img_norm_cfg require an existing --load_from checkpoint')
+    if target_norm is None and rescale != 1.0:
+        raise ValueError('cfg.model_target_img_rescale requires cfg.model_target_img_norm_cfg')
+
+    model_target = build_model(cfg.model_target) if explicit else copy.deepcopy(model)
+    if cfg.load_from:
+        load_checkpoint(model_target, cfg.load_from, map_location='cpu', strict=explicit)
+        if target_norm is not None:
+            model_target = ImageRenormTarget(
+                model_target, cfg.img_norm_cfg, target_norm, rescale=rescale)
+    model_target.requires_grad_(False)
+    if logger is not None:
+        logger.info(
+            'model_target: %s, checkpoint=%s, image renorm=%s, image rescale=%s',
+            'cfg.model_target' if explicit else 'copy of the student', cfg.load_from,
+            f'{cfg.img_norm_cfg} -> {target_norm}' if target_norm is not None else 'none',
+            rescale)
+    return model_target
 
 
 def main():
@@ -311,13 +348,12 @@ def main():
     model_target = None
     bev_diffuser = None
     if cfg.get('bev_diffuser_cfg', None) is not None:
-        model_target = copy.deepcopy(model)
+        model_target = build_model_target(cfg, model, logger)
         if cfg.load_from:
-            load_checkpoint(model_target, cfg.load_from, map_location='cpu')
+            # load_from belongs to model_target; the student starts from cfg.model.pretrained.
             cfg.load_from = None
             if cfg.model.get('pretrained', None) is None:
                 cfg.load_from = os.path.join(cfg.info_root, 'r101_dcn_fcos3d_pretrain.pth')
-        model_target.requires_grad_(False)
         bev_diffuser = BEVDiffuser(**cfg.bev_diffuser_cfg)
         bev_diffuser.requires_grad_(False)
 

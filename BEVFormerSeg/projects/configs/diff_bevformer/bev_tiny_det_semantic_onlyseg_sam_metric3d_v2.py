@@ -71,7 +71,7 @@ use_semantics = False  # cached semantic BEV replaces raw SAM3 maps
 use_depth = False  # Metric3D depth is already included in the shared BEV cache
 use_semantic_bev_cache = True
 metric_depth_range = (2.5, 170.0)
-semantic_bev_cache_root = 'data/semantic_bev'
+semantic_bev_cache_root = 'data/semantic_bev_counts'
 semantic_type = 'share'
 semantic_logcount_scale = 1e5
 
@@ -104,14 +104,14 @@ unet = dict(
             bev_w=bev_w_,
             pc_range=point_cloud_range,
             sky_as_ignore=True,
-            num_classes=16,
+            num_classes=17,
             emb_channels=256,
             channel_mult=[1, 1, 1],  # keep 256ch at every scale; must match seg_channels above
             depth_range=metric_depth_range,
             depth_type='camera_z',  # Metric3D optical-axis depth; ray_distance is also supported
             splat_mode='bilinear',
             pixel_stride=1,
-            use_legacy_prob_embed=True
+            use_legacy_prob_embed=True,
         ),
     ),
 )
@@ -146,7 +146,7 @@ model = dict(
     type='DiffBEVFormerMapSeg',
     use_mgd=True,
     mgd_alpha=10,  # current detection MGD starting value; tune for segmentation
-    mgd_lambda=0.55,  # current detection MGD starting value
+    mgd_lambda=0.45,  # current detection MGD starting value
     use_spatialchannel=False,
     spatialchannel_cell_ratio=0.6,
     spatialchannel_channel_ratio=0.85,
@@ -270,8 +270,8 @@ dataset_type = 'CustomNuScenesDiffusionDataset_seg_depth_v2'
 data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
 
-# seg_id_remap = {17: 2, 18: 2, 19: 17}
-seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
+seg_id_remap = {17: 2, 18: 2, 19: 17}
+# seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
 semantic_num_classes = unet['parameters']['seg_bev_aligner']['num_classes']
 semantic_bev_cache_settings = dict(
     seg_id_remap=seg_id_remap,

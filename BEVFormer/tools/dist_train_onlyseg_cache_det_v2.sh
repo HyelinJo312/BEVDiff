@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+# export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -10,14 +10,14 @@ export NUMEXPR_NUM_THREADS=1
 # export ACCELERATE_MIXED_PRECISION=no
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
-GPUS=4
+GPUS=8
 PORT=${PORT:-28508}
-CONFIG="./projects/configs/diff_bevformer/bev_tiny_onlyseg_sam_metric3d_v5.py"
-# Matches train_only_seg_cache.sh; override to select an existing earlier checkpoint.
-UNET_CHECKPOINT_DIR="../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_v5/checkpoint-50000"
-LOAD_FROM="./ckpts/bevformer_tiny_epoch_24.pth"
-RUN_NAME="DiffBEVFormer_tiny_onlyseg_metric3d_v5_t100_alpha100_lambda0.55"
-WORK_DIR="../results/diff_bevformer/det"
+
+CONFIG="./projects/configs/diff_bevformer/bev_base_onlyseg_sam_metric3d.py"
+UNET_CHECKPOINT_DIR="../results/bevdiffuser0/det/BEVDiffuser_base_onlyseg_sam3_metric3d/checkpoint-50000"
+LOAD_FROM="./ckpts/bevformer_r101_dcn_24ep.pth" # BEVFormer-base model
+RUN_NAME="DiffBEVFormer_base_onlyseg_metric3d_t100_alpha100_lambda0.55"
+WORK_DIR="../results/diff_bevformer0/det"
 
 # Keep the existing Stage 2 deterministic setting. Forward every extra argument.
 # Example: --resume_from /path/to/epoch_12.pth

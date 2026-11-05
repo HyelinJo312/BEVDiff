@@ -2,12 +2,12 @@ set -e
 
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 
-BEV_CONFIG="../configs/bevdiffuser/bev_tiny_onlyseg_sam_v2_metric3d_v3.py"
+BEV_CONFIG="../configs/bevdiffuser/bev_tiny_onlyseg_sam_v2_metric3d.py"
 # BEV_CONFIG="../configs/bevdiffuser/layout_tiny.py"
 
-CHECKPOINT_DIR="../../../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_v3/checkpoint-50000"
+CHECKPOINT_DIR="../../../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_task-loss/checkpoint-50000"
 
-BEV_CHECKPOINT="../../../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_v3/checkpoint-50000/bev_model.pth"
+BEV_CHECKPOINT="../../../results/bevdiffuser/det/BEVDiffuser_tiny_onlyseg_sam3_metric3d_task-loss/checkpoint-50000/bev_model.pth"
 # "../../ckpts/bevformer_tiny_epoch_24.pth" 
 
 PREDICTION_TYPE="sample"
@@ -28,8 +28,8 @@ torchrun --nproc_per_node=4 \
     --bev_checkpoint $BEV_CHECKPOINT \
     --checkpoint_dir $CHECKPOINT_DIR \
     --prediction_type $PREDICTION_TYPE \
-    --noise_timesteps 10 \
-    --denoise_timesteps 10 \
+    --noise_timesteps 5 \
+    --denoise_timesteps 5 \
     --num_inference_steps 5 \
     --cfg_scale 2.0 \
     # --use_classifier_guidence \

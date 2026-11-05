@@ -338,11 +338,16 @@ def main():
         else:
             model_target = copy.deepcopy(model)
         if cfg.load_from:
-            load_checkpoint(model_target, cfg.load_from, map_location='cpu')
+            explicit = cfg.get('model_target', None) is not None
+            load_checkpoint(model_target, cfg.load_from, map_location='cpu', strict=explicit)
             if cfg.get('model_target_img_norm_cfg', None) is not None:
                 model_target = ImageRenormTarget(
                     model_target, cfg.img_norm_cfg, cfg.model_target_img_norm_cfg,
                     rescale=cfg.get('model_target_img_rescale', 1.0))
+            logger.info('model_target: %s, checkpoint=%s, image renorm=%s, image rescale=%s',
+                        'cfg.model_target' if explicit else 'copy of cfg.model', cfg.load_from,
+                        isinstance(model_target, ImageRenormTarget),
+                        getattr(model_target, 'rescale', None))
             cfg.load_from = None
             if cfg.model.get('pretrained', None) is None:
                 cfg.load_from = os.path.join(cfg.info_root,"r101_dcn_fcos3d_pretrain.pth")

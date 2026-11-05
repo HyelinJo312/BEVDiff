@@ -170,12 +170,7 @@ model = dict(
                                 type='MSDeformableAttention3D',
                                 embed_dims=_dim_,
                                 num_points=8,
-                                num_levels=_num_levels_,
-                                # The CUDA op asserts batch % min(batch, im2col_step) == 0,
-                                # where batch is samples_per_gpu * num_cams (6). Keeping this
-                                # above that product makes the assert hold for any batch size;
-                                # it only sets kernel chunking, not the result.
-                                im2col_step=256),
+                                num_levels=_num_levels_),
                             embed_dims=_dim_,
                         )
                     ],

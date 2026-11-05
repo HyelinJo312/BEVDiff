@@ -51,13 +51,43 @@ def cache_layout(cfg):
     return cfg.get('semantic_bev_cache_layout', 'share')
 
 
+# Steps that never change camera geometry; dropped so annotations are not required.
+GEOMETRY_FREE_TRANSFORMS = ('PhotoMetricDistortionMultiViewImage', 'LoadAnnotations3D',
+                            'ObjectRangeFilter', 'ObjectNameFilter', 'LoadOccGTFromFile')
+# Deterministic steps that may set the cached geometry (RandomScaleImageMultiViewImage
+# asserts a single scale; multiple test augmentations fail in _current_metas).
+GEOMETRY_TRANSFORMS = ('LoadMultiViewImageFromFiles', 'NormalizeMultiviewImage',
+                       'RandomScaleImageMultiViewImage', 'PadMultiViewImage',
+                       'MultiScaleFlipAug3D', 'DefaultFormatBundle3D', 'CustomCollect3D')
+
+
+def cache_pipeline(pipeline):
+    """Image geometry of the pipeline that consumes a split, without random appearance."""
+    kept = []
+    for transform in copy.deepcopy(pipeline):
+        kind = transform['type']
+        if kind in GEOMETRY_FREE_TRANSFORMS:
+            continue
+        if kind not in GEOMETRY_TRANSFORMS:
+            raise ValueError(f'Cannot build a semantic BEV cache through pipeline step {kind}; '
+                             'add it to GEOMETRY_TRANSFORMS only if it is deterministic')
+        if kind == 'MultiScaleFlipAug3D':
+            transform['transforms'] = cache_pipeline(transform['transforms'])
+        elif kind == 'CustomCollect3D':
+            transform['keys'] = ['img']
+        kept.append(transform)
+    return kept
+
+
 def offline_dataset(cfg, split):
     import projects.mmdet3d_plugin
     from mmdet3d.datasets import build_dataset
     from projects.bevdiffuser import data_utils  # Register custom datasets for standalone callers.
 
+    # Each split is projected with the geometry of the pipeline that reads its cache:
+    # Stage 1 training reads train entries through data.train.pipeline.
     settings = copy.deepcopy(cfg.data.train if split == 'train' else cfg.data.test)
-    settings.update(test_mode=True, load_annos=True, pipeline=copy.deepcopy(cfg.test_pipeline),
+    settings.update(test_mode=True, load_annos=True, pipeline=cache_pipeline(settings['pipeline']),
                     filter_empty_gt=False, use_semantic_bev_cache=False)
     settings.pop('samples_per_gpu', None)
     return build_dataset(settings, default_args=dict(pc_range=cfg.point_cloud_range,

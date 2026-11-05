@@ -54,8 +54,8 @@ seg_classes = ('drivable_area', 'ped_crossing', 'walkway',
 # SAM3 raw seg-id -> model taxonomy remap
 #   lane(17)/road arrow(18) -> road(2)
 #   sky(19) -> 17
-# seg_id_remap = {17: 2, 18: 2, 19: 17}
-seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
+seg_id_remap = {17: 2, 18: 2, 19: 17}
+# seg_id_remap = {16: 2, 17: 2, 18: 2, 19: 16}
 
 num_seg_classes = len(seg_classes) + 1   # +1 for background
 
@@ -86,7 +86,7 @@ metric_depth_range = (2.5, 170.0)
 # Counts cache (layout share+counts+support = [18 share | 18 counts | 1 support]).
 # semantic_type='share' uses only the share (class distribution) channels [:18];
 # set 'share+logcount' to also feed log1p(counts) (see *_logcount.py).
-semantic_bev_cache_root = '../../data/semantic_bev'
+semantic_bev_cache_root = '../../data/semantic_bev_counts'
 semantic_type = 'share'
 semantic_logcount_scale = 1e5
 
@@ -120,7 +120,7 @@ unet = dict(
             bev_w=bev_w_,
             pc_range=point_cloud_range,
             sky_as_ignore=True,
-            num_classes=16,
+            num_classes=17,
             emb_channels=256,
             channel_mult=[1, 1, 1],  # keep 256ch at every scale; must match seg_channels above
             depth_range=metric_depth_range,

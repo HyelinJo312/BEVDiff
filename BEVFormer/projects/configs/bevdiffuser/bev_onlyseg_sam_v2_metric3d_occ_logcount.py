@@ -6,7 +6,8 @@
 #
 # Build the cache first (from BEVFormer/projects/bevdiffuser):
 #   CONFIG=../configs/bevdiffuser/bev_onlyseg_sam_v2_metric3d_occ_logcount.py \
-#   CACHE_ROOT=../../data/semantic_bev_occ_v2_counts bash build_semantic_bev_cache_occ.sh
+#   CACHE_ROOT=../../data/semantic_bev_occ_v2_counts SOURCE_VERSION=semantic_bev_occ_ego \
+#   bash build_semantic_bev_cache.sh
 _base_ = ['./bev_onlyseg_sam_v2_metric3d_occ.py']
 
 semantic_type = 'share+logcount'

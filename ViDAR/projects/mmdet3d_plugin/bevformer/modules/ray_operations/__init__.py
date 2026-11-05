@@ -1,1 +1,0 @@
-from .latent_rendering import LatentRendering

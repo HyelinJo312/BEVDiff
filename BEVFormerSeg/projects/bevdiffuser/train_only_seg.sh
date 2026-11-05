@@ -22,7 +22,7 @@ PRETRAINED_UNET_CHECKPOINT=None
 
 # set up wandb project
 PROJ_NAME=BEVDiffuserSeg
-RUN_NAME=BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2_2
+RUN_NAME=BEVDiffuserSeg_tiny_onlyseg_sam3_metric3d_v2_3
 CHECKPOINT_STEP=10000
 CHECKPOINT_LIMIT=3
 
@@ -40,7 +40,7 @@ UNCOND_PROB=0.2   # seg CFG dropout
 PREDICTION_TYPE="sample" # "sample", "epsilon" or "v_prediction"
 TASK_LOSS_SCALE=0
 
-OUTPUT_DIR="../../../results/map_seg/bevdiffuser/${RUN_NAME}"
+OUTPUT_DIR="../../../results/bevdiffuser0/map_seg/${RUN_NAME}"
 # RESUME_FROM="results/bevdiffuser/stage1/BEVDiffuserSeg_tiny_onlyseg_sam3_v3/checkpoint-30000"
 
 mkdir -p "$OUTPUT_DIR"

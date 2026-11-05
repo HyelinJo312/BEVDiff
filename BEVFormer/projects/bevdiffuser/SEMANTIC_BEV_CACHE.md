@@ -2,7 +2,14 @@
 
 The standard Metric3D/v5 detection config reads pre-embedding semantic BEV
 probabilities directly with `np.load(path, allow_pickle=False)`; that legacy
-path does not require a manifest. The Occ3D training dataset checks the
+path does not require a manifest and does not check the geometry digest.
+
+The builder projects each split with the image geometry of the pipeline that
+reads it: `train` entries through `data.train.pipeline` (what Stage 1 training
+uses) and `val` entries through `data.test.pipeline`. Photometric, annotation
+and Occ3D GT steps are dropped; any other step outside the builder's
+deterministic allowlist stops the build. The geometry digest stored per entry is
+checked only when the builder resumes into an existing root. The Occ3D training dataset checks the
 manifest's output frame when its explicit expected-frame setting is provided;
 the cache root must still be kept distinct.
 
@@ -31,11 +38,14 @@ Its immutable source identifier is
 `projection.bev_h=50`, `projection.bev_w=50`, and
 `projection.num_classes=16`.
 
-The prepared launcher reuses the generic builder. From
-`BEVFormer/projects/bevdiffuser/`:
+The shared launcher `build_semantic_bev_cache.sh` defaults to the detection
+cache (`bev_tiny_onlyseg_sam_v2_metric3d.py` into `data/semantic_bev`, source
+`sam3_metric3d_v1`). For Occ3D, override its config, root and source version.
+From `BEVFormer/projects/bevdiffuser/`:
 
 ```bash
-bash build_semantic_bev_cache_occ.sh
+OCC="CONFIG=../configs/bevdiffuser/bev_onlyseg_sam_v2_metric3d_occ.py CACHE_ROOT=../../data/semantic_bev_occ_v2 SOURCE_VERSION=semantic_bev_occ_ego"
+env $OCC bash build_semantic_bev_cache.sh
 ```
 
 The launcher defaults to eight visible GPUs (`CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`)
@@ -45,9 +55,9 @@ the builder always uses the logical indices inside that visibility mask.
 For example, one or two GPUs and a bounded subset:
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 bash build_semantic_bev_cache_occ.sh --split train --indices 0 1
-CUDA_VISIBLE_DEVICES=2,5 bash build_semantic_bev_cache_occ.sh --split train --indices 0 1
-bash build_semantic_bev_cache_occ.sh --wait-for-lock
+env $OCC CUDA_VISIBLE_DEVICES=3 bash build_semantic_bev_cache.sh --split train --indices 0 1
+env $OCC CUDA_VISIBLE_DEVICES=2,5 bash build_semantic_bev_cache.sh --split train --indices 0 1
+env $OCC bash build_semantic_bev_cache.sh --wait-for-lock
 ```
 
 The launcher accepts `PYTHON`, `CONFIG`, `CACHE_ROOT`, `SOURCE_VERSION`,
